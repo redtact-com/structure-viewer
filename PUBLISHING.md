@@ -21,29 +21,43 @@ release job 全体は repository variable **`NPM_PUBLISH_ENABLED`** でゲート
 npm 側の認証準備（下記）が整うまでは無効のままにしておく — 未設定でも workflow
 が失敗することはなく、単に何も起きない。
 
-publish の認証は 2 段階で移行する:
+### 認証の現状（2026-07-18 時点）
 
-1. **初回 publish**: `NPM_TOKEN`（granular access token）。trusted publisher は
-   npm 上に存在するパッケージにしか登録できないため、初回だけトークンが必要。
-2. **公開後**: 各パッケージに trusted publisher（OIDC）を登録し、
-   `NPM_TOKEN` シークレットを削除する。以後は CI に長期シークレットを置かずに
-   publish でき、npm が **provenance 証明** を自動付与する。
+**両パッケージとも trusted publisher 登録済み・`NPM_TOKEN` シークレットは削除済み。
+publish は npm trusted publishing（OIDC）のみで動いている。** CI に長期シークレットは
+無く、npm が **provenance 証明**（SLSA）を自動付与する。
+
+実地検証済み: `@redtact/mc-assets@0.2.0` の publish が OIDC 経路で成功
+（ログ `No NPM_TOKEN found, but OIDC is available - using npm trusted publishing`、
+registry の `dist.attestations.provenance` あり）。
+
+したがって通常運用で必要なのは **changeset を書いて main にマージするだけ**。
+`NPM_TOKEN` を再設定する必要はない（設定すると OIDC より優先されてしまう）。
+
+以下の「初回 publish: トークン方式」節は、新しいパッケージを追加したときに
+再び必要になる手順として履歴・参照用に残してある（trusted publisher は npm 上に
+存在するパッケージにしか登録できないため、**新規パッケージの初回だけ**トークンが要る）。
 
 > **期限注意**: granular token による CI publish（2FA バイパス）は npm 側で
-> **2027 年 1 月頃に廃止予定**とアナウンスされている。トークン方式は初回 publish
-> の一時利用にとどめ、公開後すみやかに trusted publisher（OIDC）へ移行して
-> トークンを削除すること。
+> **2027 年 1 月頃に廃止予定**とアナウンスされている。新規パッケージ追加で
+> トークンを使った場合も、初回 publish 後すみやかに trusted publisher（OIDC）へ
+> 移行してトークンを削除すること。
 
 ## このリポジトリのパッケージ
 
-| npm パッケージ | ディレクトリ |
-| --- | --- |
-| `@redtact/deepslate-extras` | `packages/deepslate-extras` |
-| `@redtact/mc-assets` | `packages/mc-assets` |
+| npm パッケージ | ディレクトリ | trusted publisher |
+| --- | --- | --- |
+| `@redtact/deepslate-extras` | `packages/deepslate-extras` | 登録済み（OIDC） |
+| `@redtact/mc-assets` | `packages/mc-assets` | 登録済み（OIDC） |
 
-## 初回 publish: トークン方式（`NPM_TOKEN`）
+`NPM_PUBLISH_ENABLED` variable は `true` に設定済み（release job 有効）。
 
-0. publish ゲートを有効化する（npm 側の準備が整うまで release job は skip される）:
+## 参考: 新規パッケージの初回 publish（トークン方式 `NPM_TOKEN`）
+
+> 既存 2 パッケージでは **不要**（OIDC 登録済み）。新しいパッケージを追加した
+> ときだけ、その初回 publish に限って必要になる手順。
+
+0. publish ゲートが無効な場合は有効化する（無効の間は release job が skip される）:
 
    ```bash
    gh variable set NPM_PUBLISH_ENABLED --repo redtact-com/structure-viewer --body true
@@ -62,9 +76,9 @@ publish の認証は 2 段階で移行する:
 
 3. changeset を含む PR → "Version Packages" PR マージで初回 publish が走る。
 
-## 公開後: trusted publisher 登録（npmjs.com で手動）
+## trusted publisher 登録（npmjs.com で手動 / 既存 2 パッケージは実施済み）
 
-上の表の **全パッケージ** について繰り返す:
+新しいパッケージを追加したときに、その初回 publish 後に実施する:
 
 1. <https://www.npmjs.com/> にパッケージオーナー（`redtact`）でログイン。
 2. パッケージページ → **Settings** タブ
@@ -79,7 +93,8 @@ publish の認証は 2 段階で移行する:
    | Workflow filename | `publish.yml` |
    | Environment name | （空欄のまま） |
 
-4. 保存。全パッケージの登録が済んだらシークレットを削除して OIDC に切り替える:
+4. 保存。登録が済んだらシークレットを削除して OIDC に切り替える
+   （既存 2 パッケージについては実施済み・シークレットは現在存在しない）:
 
    ```bash
    gh secret delete NPM_TOKEN --repo redtact-com/structure-viewer
@@ -111,7 +126,7 @@ git push --follow-tags
 
 | 症状 | 原因の見当 |
 | --- | --- |
-| CI で `ENEEDAUTH` | trusted publisher 未登録（または初回で `NPM_TOKEN` シークレット未設定）。 |
+| CI で `ENEEDAUTH` | そのパッケージの trusted publisher 未登録（新規パッケージの初回 publish なら `NPM_TOKEN` を一時設定する）。 |
 | OIDC トークン交換が失敗 / 404 | trusted publisher 登録の項目不一致（リポジトリ名・workflow ファイル名・environment）。 |
 | `E422` / provenance エラー | package.json の `repository.url` がこの GitHub リポジトリと不一致。 |
 | publish 成功だが provenance バッジなし | `publish.yml` の `NPM_CONFIG_PROVENANCE` env と `id-token: write` 権限を確認。 |
