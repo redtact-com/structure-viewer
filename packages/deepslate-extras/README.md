@@ -15,7 +15,9 @@ Extras for [deepslate](https://github.com/misode/deepslate) structure viewers:
   when idle
 - `getSliceRange`, `getBlockFlags`, `padTextureBlobs` helpers
 
-`deepslate` (`^0.25.1`) is a peer dependency.
+`deepslate` (`^0.25.1`) is a peer dependency. Node.js >= 20.19 (or >= 22.12 on
+the 22.x line) is required for the CJS entry (`require(esm)` support, since
+deepslate is ESM-only).
 
 See the [repository README](https://github.com/redtact-com/structure-viewer#readme)
 for usage examples.

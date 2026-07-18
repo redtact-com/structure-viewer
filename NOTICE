@@ -12,9 +12,10 @@ Specifically:
   shaders.
 - packages/deepslate-extras — deepslatePatches.ts: contains optimized
   derived copies of implementation from the deepslate distribution
-  (Mesh.prototype.rebuild / merge and Renderer.prototype.setVertexAttr /
-  setUniform / prepareDraw / drawMesh), applied as runtime prototype
-  patches that preserve the original output bit-for-bit.
+  (Mesh.prototype.rebuild / merge / clear / isEmpty / quadVertices /
+  quadIndices and Renderer.prototype.setVertexAttr / setUniform /
+  prepareDraw / drawMesh), applied as runtime prototype patches that
+  preserve the original output bit-for-bit.
 
 The original deepslate license is reproduced below:
 

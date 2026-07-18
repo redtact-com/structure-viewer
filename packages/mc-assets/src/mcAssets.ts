@@ -22,13 +22,23 @@ export interface McAssetsOptions {
   /**
    * バージョンディレクトリの親 URL (例: "https://cdn.example.com/mc-assets")。
    * 末尾スラッシュは正規化される。未指定・空文字は既定の相対 "/mc-assets"。
+   *
+   * Parent URL of the version directory. Trailing slashes are normalized;
+   * unset/empty falls back to the same-origin default "/mc-assets".
    */
   baseUrl?: string
   /**
-   * URL に ?v= として付与するキャッシュバスト用リビジョン。
-   * 同一 MC バージョンのままアセット pin を更新したときに immutable キャッシュを
-   * バストするためのもの (fetch-mc-assets が出力する revision.json の値)。
-   * 未指定ならクエリを付けない。
+   * URL に ?v= として付与するキャッシュバスト用リビジョン
+   * (fetch-mc-assets が出力する revision.json / --emit-module の値)。
+   * アセットを immutable キャッシュ (Cache-Control: immutable / max-age 長期) で
+   * 配信する場合は **必須** — 渡し忘れるとアセット pin 更新後も古いキャッシュが
+   * 最長 1 年参照され続ける。fetch-mc-assets --emit-module で生成した定数
+   * モジュールを無条件 import して渡す配線を推奨。キャッシュしない配信でのみ省略可。
+   *
+   * Cache-busting revision appended as ?v= (from revision.json / --emit-module
+   * written by fetch-mc-assets). REQUIRED when serving the assets with
+   * immutable/long-lived caching — without it, pin updates are not picked up
+   * until caches expire. Only omit when the assets are served uncached.
    */
   revision?: string
 }
@@ -40,6 +50,11 @@ let revision: string | undefined
  * アセット取得のグローバル設定。アプリ初期化時 (fetch を伴う関数の呼び出し前) に呼ぶ。
  * 毎回設定全体を置き換える: 省略したフィールドは既定値に戻る
  * (`configureMcAssets()` で全既定値にリセット)。
+ *
+ * Global configuration for asset fetching; call once at app startup, before any
+ * fetching function. Each call REPLACES the entire configuration — pass all
+ * options in a single call, as omitted fields reset to their defaults
+ * (`configureMcAssets()` resets everything).
  */
 export function configureMcAssets(options: McAssetsOptions = {}): void {
   const cleaned = options.baseUrl?.trim().replace(/\/+$/, '')

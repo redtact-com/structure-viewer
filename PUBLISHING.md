@@ -5,12 +5,21 @@
 
 ## リリースフロー（自動）
 
-1. changeset（`.changeset/*.md`）を含む PR が `main` にマージされる。
-2. `.github/workflows/publish.yml` の `changesets/action` が
-   **"Version Packages"** PR を作成/更新する。
-3. その PR をマージすると同じ workflow が再度走り、`pnpm changeset publish` が
-   npm 未公開バージョンの全パッケージを publish し、git タグ push と
-   GitHub Release 作成まで行う。
+`main` への push ごとに `.github/workflows/publish.yml` の `changesets/action`
+が動く。挙動は **changeset の有無で分岐する** 点に注意:
+
+- **changeset（`.changeset/*.md`）がある push** → publish はせず、
+  **"Version Packages"** PR（version bump + CHANGELOG）を作成/更新する。
+- **changeset がない push** → 即座に `pnpm changeset publish` を実行し、
+  「package.json のバージョンが npm 上に存在しない」全パッケージを publish する。
+  Version Packages PR のマージはこちらのケースで、publish → git タグ push →
+  GitHub Release 作成まで行う。逆に言うと、docs 修正など通常の push でも
+  現行バージョンが npm 未公開なら publish が試行される。
+
+release job 全体は repository variable **`NPM_PUBLISH_ENABLED`** でゲートしており、
+`true` でない間は job が skip される（publish も Version PR 作成も起きない）。
+npm 側の認証準備（下記）が整うまでは無効のままにしておく — 未設定でも workflow
+が失敗することはなく、単に何も起きない。
 
 publish の認証は 2 段階で移行する:
 
@@ -19,6 +28,11 @@ publish の認証は 2 段階で移行する:
 2. **公開後**: 各パッケージに trusted publisher（OIDC）を登録し、
    `NPM_TOKEN` シークレットを削除する。以後は CI に長期シークレットを置かずに
    publish でき、npm が **provenance 証明** を自動付与する。
+
+> **期限注意**: granular token による CI publish（2FA バイパス）は npm 側で
+> **2027 年 1 月頃に廃止予定**とアナウンスされている。トークン方式は初回 publish
+> の一時利用にとどめ、公開後すみやかに trusted publisher（OIDC）へ移行して
+> トークンを削除すること。
 
 ## このリポジトリのパッケージ
 

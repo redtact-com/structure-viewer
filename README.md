@@ -11,6 +11,10 @@ Libraries for building Minecraft structure viewers on top of
 Both packages declare `deepslate` (`^0.25.1`) as a **peer dependency** — install
 it alongside them.
 
+Node.js **>= 20.19** (or >= 22.12 on the 22.x line) is required when consuming
+the CJS entry points: `deepslate` is ESM-only, so `require()` of these packages
+relies on Node's `require(esm)` support.
+
 ## Install
 
 ```bash
@@ -82,28 +86,42 @@ support pick/drag-select interactions, and `getSliceRange` /
 ### 1. Fetch assets at build time (CLI)
 
 ```bash
-npx fetch-mc-assets              # writes ./public/mc-assets/1.21.5/
-npx fetch-mc-assets --out static/mc-assets --force
+npx -p @redtact/mc-assets fetch-mc-assets   # writes ./public/mc-assets/1.21.5/
+# or, with the package installed: pnpm exec fetch-mc-assets
+pnpm exec fetch-mc-assets --out static/mc-assets --force
+pnpm exec fetch-mc-assets --emit-module app/mcAssetsRevision.ts
 ```
 
 Downloads blockstates/models (PrismarineJS/minecraft-assets, SHA-pinned) and
 textures (misode/mcmeta, version-tag-pinned) into your app's static directory.
 Commit the output for reproducible builds. A `revision.json` is written next to
-the assets for cache busting.
+the assets, and `--emit-module <path>` additionally writes a constant module
+(`export const MC_ASSETS_REVISION = "..."`) into your app source so the
+cache-bust revision is wired by an unconditional import and cannot be
+forgotten.
 
 ### 2. Build deepslate resources at runtime
 
 ```ts
 import { configureMcAssets, buildResources } from "@redtact/mc-assets";
+import { MC_ASSETS_REVISION } from "./mcAssetsRevision"; // from --emit-module
 
-// Optional. Defaults to same-origin "/mc-assets" with no cache-bust query.
+// Replaces the entire config — pass all options in one call
+// (omitted fields reset to their defaults).
 configureMcAssets({
   baseUrl: "https://cdn.example.com/mc-assets", // parent of the version dir
-  revision: "3b7b880",                          // from revision.json
+                                                // (default: same-origin "/mc-assets")
+  revision: MC_ASSETS_REVISION,                 // REQUIRED for immutable-cache serving
 });
 
 const resources = await buildResources(structure.getBlocks().map(b => b.state.getName().toString()));
 ```
+
+`revision` is appended as a `?v=` query for cache busting. If you serve the
+assets with immutable/long-lived caching (recommended), wiring it is
+**required** — without it, asset pin updates are not picked up until caches
+expire (up to a year). It may only be omitted when the assets are served
+uncached.
 
 `buildResources` fetches only the textures actually referenced by the given
 block list, works around deepslate atlas sizing quirks, and returns a ready
@@ -142,7 +160,8 @@ npm install @redtact/deepslate-extras @redtact/mc-assets deepslate
 1. アセットをアプリの `public/` に配置 (ビルド時に 1 回、生成物はコミット):
 
    ```bash
-   npx fetch-mc-assets   # → public/mc-assets/1.21.5/
+   npx -p @redtact/mc-assets fetch-mc-assets --emit-module app/mcAssetsRevision.ts
+   # → public/mc-assets/1.21.5/ + リビジョン定数モジュール
    ```
 
 2. アプリ初期化時にパッチ適用とアセット設定:
@@ -150,9 +169,12 @@ npm install @redtact/deepslate-extras @redtact/mc-assets deepslate
    ```ts
    import { applyDeepslatePatches } from "@redtact/deepslate-extras";
    import { configureMcAssets, buildResources } from "@redtact/mc-assets";
+   import { MC_ASSETS_REVISION } from "./mcAssetsRevision"; // --emit-module の生成物
 
    applyDeepslatePatches({ releaseQuadsAfterUpload: true }); // GL 生成前に 1 回
-   configureMcAssets({ revision: "3b7b880" }); // 既定 baseUrl は同一オリジン /mc-assets
+   // configureMcAssets は毎回「全置換」— 必要なオプションは 1 回でまとめて渡す。
+   // revision は immutable キャッシュ配信では必須 (忘れると pin 更新が反映されない)
+   configureMcAssets({ revision: MC_ASSETS_REVISION }); // 既定 baseUrl は同一オリジン /mc-assets
    ```
 
 3. 描画 (deepslate の `StructureRenderer` と組み合わせる):

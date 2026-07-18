@@ -11,28 +11,81 @@
 //   - テクスチャ: misode/mcmeta のバージョン固定タグ <version>-assets
 //       block/ + item/ 全量と、deepslate SpecialRenderer が参照し得る entity/ サブセット
 //
-// 使い方 (アプリのルートで実行):
-//   fetch-mc-assets                          # ./public/mc-assets/<version>/ に配置 (既存はスキップ)
-//   fetch-mc-assets --out static/mc-assets   # 出力先ルートの変更 (<out>/<version>/ に配置)
-//   fetch-mc-assets --force                  # 全ファイル再取得 (pin 更新時)
+// 使い方 (アプリのルートで実行。インストール済みなら pnpm exec / npx -p で):
+//   npx -p @redtact/mc-assets fetch-mc-assets    # ./public/mc-assets/<version>/ に配置 (既存はスキップ)
+//   fetch-mc-assets --out static/mc-assets       # 出力先ルートの変更 (<out>/<version>/ に配置)
+//   fetch-mc-assets --force                      # 全ファイル再取得 (pin 更新時)
 //   fetch-mc-assets --mc-version 1.21.5 --prismarine-commit <sha>
+//   fetch-mc-assets --emit-module src/mcAssetsRevision.ts   # リビジョン定数モジュールを生成
 //
-// 完了時に <out>/<version>/revision.json を書き出す。同一 MC バージョンのまま
-// アセット pin (--prismarine-commit) を更新したときは、この revision を
-// configureMcAssets({ revision }) に渡すことで immutable キャッシュが正しくバストされる。
+// 完了時に <out>/<version>/revision.json を書き出す。immutable キャッシュで配信する場合、
+// この revision を configureMcAssets({ revision }) に渡す配線は必須 — 渡し忘れると
+// アセット pin 更新後も古いキャッシュが最長 1 年参照され続ける。--emit-module で
+// リビジョン定数モジュールをアプリの src に書き出し、無条件 import で配線するのが安全。
 
-import { mkdir, writeFile, access, stat, rename } from "node:fs/promises";
+import { mkdir, writeFile, access, stat, rename, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+const USAGE = `Usage: fetch-mc-assets [options]
+
+Download Minecraft blockstates/models/textures into <out>/<version>/ for
+self-hosted serving with @redtact/mc-assets.
+
+Options:
+  --out <dir>               Output root directory (default: public/mc-assets)
+  --mc-version <version>    Minecraft version (default: 1.21.5)
+  --prismarine-commit <sha> PrismarineJS/minecraft-assets commit pin
+  --emit-module <path>      Also write a revision constant module for your app
+                            (.json => {"revision":...}, otherwise an ES module
+                            exporting MC_ASSETS_REVISION). Import it and pass to
+                            configureMcAssets({ revision }) so the cache-bust
+                            wiring cannot be forgotten.
+  --force                   Re-download everything (when updating pins)
+  -h, --help                Show this help
+  --version                 Show CLI version
+`;
+
+const VALUE_FLAGS = new Set(["--out", "--mc-version", "--prismarine-commit", "--emit-module"]);
+const BOOL_FLAGS = new Set(["--force", "--help", "-h", "--version"]);
+
 const args = process.argv.slice(2);
+
+// フラグ検証: 未知の -- フラグは usage を出して exit 1 (タイポでフル DL が走るのを防ぐ)
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (!a.startsWith("-")) {
+    console.error(`unknown argument: ${a}\n\n${USAGE}`);
+    process.exit(1);
+  }
+  if (VALUE_FLAGS.has(a)) {
+    i++; // 値をスキップ (値の有無は argValue が検証)
+    continue;
+  }
+  if (!BOOL_FLAGS.has(a)) {
+    console.error(`unknown option: ${a}\n\n${USAGE}`);
+    process.exit(1);
+  }
+}
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+if (args.includes("--version")) {
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  console.log(pkg.version);
+  process.exit(0);
+}
+
 const force = args.includes("--force");
 
 function argValue(name, fallback) {
   const i = args.indexOf(name);
   if (i === -1) return fallback;
   const v = args[i + 1];
-  if (!v || v.startsWith("--")) {
-    console.error(`${name} には値が必要`);
+  if (!v || v.startsWith("-")) {
+    console.error(`${name} には値が必要\n\n${USAGE}`);
     process.exit(1);
   }
   return v;
@@ -73,6 +126,7 @@ const TEXTURE_PREFIXES = [
 const CONCURRENCY = 24;
 
 const outDir = resolve(argValue("--out", join("public", "mc-assets")), MC_VERSION);
+const emitModulePath = argValue("--emit-module", null);
 
 async function fetchOk(url) {
   const res = await fetch(url);
@@ -189,15 +243,35 @@ async function report(paths) {
 // --- 4. リビジョンの書き出し ---
 // 同一 MC バージョンのまま PRISMARINE_COMMIT だけ更新した場合でも URL を変えられるよう、
 // configureMcAssets({ revision }) に渡すリビジョンを revision.json へ書き出す。
+// immutable キャッシュ配信ではこの配線が必須 (忘れると pin 更新が最長 1 年反映されない)。
 async function writeRevision() {
   const rev = PRISMARINE_COMMIT.slice(0, 7);
   await writeFileAtomic(join(outDir, "revision.json"), `${JSON.stringify({ revision: rev })}\n`);
   console.log(
     `wrote revision.json (revision=${rev}) — configureMcAssets({ revision: "${rev}" }) に渡す`,
   );
+  return rev;
+}
+
+// --- 5. リビジョン定数モジュールの生成 (--emit-module) ---
+// アプリの src に定数モジュールを置いて無条件 import することで、
+// configureMcAssets({ revision }) の渡し忘れ (= stale キャッシュの罠) を構造的に防ぐ。
+async function emitRevisionModule(rev) {
+  if (!emitModulePath) return;
+  const dest = resolve(emitModulePath);
+  await mkdir(dirname(dest), { recursive: true });
+  const content = dest.endsWith(".json")
+    ? `${JSON.stringify({ revision: rev })}\n`
+    : `// fetch-mc-assets が生成する。手で編集しない。\n` +
+      `// アセット pin (--prismarine-commit) 更新時の immutable キャッシュバスト用リビジョン。\n` +
+      `// configureMcAssets({ revision: MC_ASSETS_REVISION }) に渡す。\n` +
+      `export const MC_ASSETS_REVISION = "${rev}";\n`;
+  await writeFileAtomic(dest, content);
+  console.log(`wrote ${dest} (MC_ASSETS_REVISION=${rev})`);
 }
 
 await fetchBlocksJson();
 const paths = await fetchTextures();
 await report(paths);
-await writeRevision();
+const rev = await writeRevision();
+await emitRevisionModule(rev);

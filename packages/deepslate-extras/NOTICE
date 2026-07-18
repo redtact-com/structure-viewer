@@ -1,20 +1,20 @@
-structure-viewer
+@redtact/deepslate-extras (part of structure-viewer)
 Copyright 2026 redtact
 
-This product includes software derived from deepslate
+This package includes software derived from deepslate
 (https://github.com/misode/deepslate) by Misode, which is licensed under
 the MIT License.
 
 Specifically:
 
-- packages/deepslate-extras — FadeRenderer.ts: the GLSL vertex/fragment
-  shaders are modified copies of deepslate's standard block and line
-  shaders.
-- packages/deepslate-extras — deepslatePatches.ts: contains optimized
-  derived copies of implementation from the deepslate distribution
-  (Mesh.prototype.rebuild / merge and Renderer.prototype.setVertexAttr /
-  setUniform / prepareDraw / drawMesh), applied as runtime prototype
-  patches that preserve the original output bit-for-bit.
+- FadeRenderer.ts: the GLSL vertex/fragment shaders are modified copies
+  of deepslate's standard block and line shaders.
+- deepslatePatches.ts: contains optimized derived copies of
+  implementation from the deepslate distribution (Mesh.prototype.rebuild
+  / merge / clear / isEmpty / quadVertices / quadIndices and
+  Renderer.prototype.setVertexAttr / setUniform / prepareDraw /
+  drawMesh), applied as runtime prototype patches that preserve the
+  original output bit-for-bit.
 
 The original deepslate license is reproduced below:
 
