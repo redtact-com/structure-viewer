@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // ビルド (emit) は tsup が担うため rootDir/outDir は指定しない
+    // (paths で参照する workspace 依存の src が rootDir 制約に衝突する)。
+    "noEmit": true,
+    // workspace 依存を未ビルド (dist なし) でも typecheck できるよう src を直接参照する。
+    // tsup では external 指定なのでバンドル・d.ts には影響しない。
+    "paths": {
+      "@redtact/deepslate-extras": ["../deepslate-extras/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

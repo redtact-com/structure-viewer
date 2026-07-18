@@ -1,0 +1,61 @@
+{
+  "name": "@redtact/mc-assets",
+  "version": "0.1.0",
+  "description": "Self-hosted Minecraft asset pipeline for deepslate viewers: blockstates/models/texture fetching, deepslate Resources building, and an asset download CLI.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "bin": {
+    "fetch-mc-assets": "./bin/fetch-mc-assets.mjs"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsup --watch"
+  },
+  "keywords": [
+    "minecraft",
+    "deepslate",
+    "assets",
+    "textures",
+    "blockstates",
+    "resources"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "deepslate": "^0.25.1"
+  },
+  "dependencies": {
+    "@redtact/deepslate-extras": "workspace:^"
+  },
+  "devDependencies": {
+    "deepslate": "^0.25.1",
+    "tsup": "^8.3.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "license": "Apache-2.0",
+  "author": "redtact",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/redtact-com/structure-viewer.git",
+    "directory": "packages/mc-assets"
+  },
+  "homepage": "https://github.com/redtact-com/structure-viewer#readme"
+}

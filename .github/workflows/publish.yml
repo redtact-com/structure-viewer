@@ -1,0 +1,61 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write # changesets/action: push version commit / tags, create GitHub Releases
+  pull-requests: write # changesets/action: create/update the "Version Packages" PR
+  id-token: write # npm trusted publishing (OIDC) + provenance attestation
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Trusted publishing (OIDC) requires npm >= 11.5.1, but the Node runner may
+      # bundle an older npm. `pnpm publish` (invoked by `changeset publish`)
+      # delegates the actual registry upload to the npm CLI on PATH, so upgrading
+      # the global npm is what enables OIDC.
+      # npm 12 is intentionally avoided until it matures.
+      - run: npm install -g npm@^11.5.1
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run build
+
+      # Authentication (initial → steady state):
+      #   1. NPM_TOKEN secret (granular automation token) — used for the FIRST
+      #      publish of each package (trusted publishers can only be registered on
+      #      packages that already exist on npmjs.com). If the secret is set,
+      #      changesets/action writes it to ~/.npmrc and token auth takes
+      #      precedence over OIDC.
+      #   2. npm trusted publishing (OIDC) — steady state. After registering this
+      #      repo + workflow as a trusted publisher on each package (see
+      #      PUBLISHING.md), delete the NPM_TOKEN secret; publishes then run
+      #      without any long-lived secret.
+      - name: Create Release Pull Request or Publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          publish: pnpm changeset publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Attach provenance attestations to published packages (works with both
+          # OIDC and token auth thanks to `id-token: write` above).
+          NPM_CONFIG_PROVENANCE: "true"

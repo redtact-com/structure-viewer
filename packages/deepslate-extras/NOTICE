@@ -1,0 +1,41 @@
+structure-viewer
+Copyright 2026 redtact
+
+This product includes software derived from deepslate
+(https://github.com/misode/deepslate) by Misode, which is licensed under
+the MIT License.
+
+Specifically:
+
+- packages/deepslate-extras — FadeRenderer.ts: the GLSL vertex/fragment
+  shaders are modified copies of deepslate's standard block and line
+  shaders.
+- packages/deepslate-extras — deepslatePatches.ts: contains optimized
+  derived copies of implementation from the deepslate distribution
+  (Mesh.prototype.rebuild / merge and Renderer.prototype.setVertexAttr /
+  setUniform / prepareDraw / drawMesh), applied as runtime prototype
+  patches that preserve the original output bit-for-bit.
+
+The original deepslate license is reproduced below:
+
+  MIT License
+
+  Copyright (c) 2021 Misode
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
