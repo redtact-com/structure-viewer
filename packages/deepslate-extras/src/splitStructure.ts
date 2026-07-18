@@ -14,11 +14,175 @@ export interface StoredBlock {
 export interface StructureInternal {
   palette: BlockState[];
   blocks: StoredBlock[];
+  /**
+   * 座標を平坦化した index (`x*sy*sz + y*sz + z`) をキーにした疎配列。
+   * `getBlock` はこちらしか見ないため、`blocks` と両方を整合させて更新する必要がある。
+   */
+  blocksMap: (StoredBlock | undefined)[];
 }
 
-/** Structure の内部 palette/blocks を読み出す (palette 単位の前計算・直接構築用)。 */
+/** Structure の内部 palette/blocks/blocksMap を読み出す (palette 単位の前計算・直接構築用)。 */
 export function structureInternals(structure: Structure): StructureInternal {
   return structure as unknown as StructureInternal;
+}
+
+// ── in-place 差分ヘルパ ────────────────────────────────────────────────
+//
+// ピック 1 個で Structure を作り直すと O(N) かかるので、inner/outer 間で
+// StoredBlock を「移す」だけの操作を提供する。palette は splitStructure /
+// splitStructureCropped が slice() で切り離した同一内容のコピーなので、
+// palette index はそのまま持ち回れる (再解決不要)。
+
+/** 平坦化 index。Structure.getBlock / constructor と同一の式 */
+function flatIndex(pos: readonly number[], size: readonly number[]): number {
+  return pos[0] * size[1] * size[2] + pos[1] * size[2] + pos[2];
+}
+
+function isInside(pos: readonly number[], size: readonly number[]): boolean {
+  return (
+    pos[0] >= 0 &&
+    pos[0] < size[0] &&
+    pos[1] >= 0 &&
+    pos[1] < size[1] &&
+    pos[2] >= 0 &&
+    pos[2] < size[2]
+  );
+}
+
+/**
+ * 平坦化 index → `blocks` 配列内の位置。
+ *
+ * これが無いと remove ごとに `blocks` の線形走査が入り、ドラッグ確定
+ * (数千ブロック) が O(N·M) になる。オブジェクト同一性ではなく座標で引くのは
+ * deepslate の `Structure.addBlock` が `blocks` と `blocksMap` に
+ * **別々のオブジェクトリテラル**を入れるため (constructor 経路は同一オブジェクト)。
+ * キャッシュが配列と食い違っていた場合は線形走査にフォールバックするので、
+ * 外部から blocks を直接いじられても壊れない。
+ */
+const blockPositionCache = new WeakMap<Structure, Map<number, number>>();
+
+function positionCacheFor(
+  structure: Structure,
+  blocks: StoredBlock[],
+  size: readonly number[],
+): Map<number, number> {
+  let cache = blockPositionCache.get(structure);
+  if (!cache) {
+    cache = new Map();
+    for (let i = 0; i < blocks.length; i++) cache.set(flatIndex(blocks[i].pos, size), i);
+    blockPositionCache.set(structure, cache);
+  }
+  return cache;
+}
+
+/** pos にある StoredBlock を返す (PlacedBlock を作らないので O(1) かつ非アロケート)。無ければ null */
+export function storedBlockAt(
+  structure: Structure,
+  pos: readonly [number, number, number],
+): StoredBlock | null {
+  const size = structure.getSize();
+  if (!isInside(pos, size)) return null;
+  return structureInternals(structure).blocksMap[flatIndex(pos, size)] ?? null;
+}
+
+/**
+ * pos のブロックを構造体から取り除いて返す (無ければ null)。
+ * `blocks` は swap-remove するため配列順が変わる (チャンク内 quad の並びが変わるだけで
+ * 描画結果は不変。deepslate はチャンク内をソートしていない)。
+ *
+ * 前提: 同一座標に複数の StoredBlock が登録されていないこと (blocksMap は
+ * 最後の 1 個しか指さないため、重複があると getBlock と getBlocks が乖離する)。
+ * サーバ正規化済みの Java Structure NBT では発生しない。
+ */
+export function removeStoredBlock(
+  structure: Structure,
+  pos: readonly [number, number, number],
+): StoredBlock | null {
+  const size = structure.getSize();
+  if (!isInside(pos, size)) return null;
+  const internal = structureInternals(structure);
+  const index = flatIndex(pos, size);
+  const stored = internal.blocksMap[index];
+  if (!stored) return null;
+  delete internal.blocksMap[index];
+
+  const blocks = internal.blocks;
+  const cache = positionCacheFor(structure, blocks, size);
+  let at = cache.get(index);
+  if (at === undefined || !blocks[at] || flatIndex(blocks[at].pos, size) !== index) {
+    at = blocks.findIndex((b) => flatIndex(b.pos, size) === index);
+  }
+  cache.delete(index);
+  if (at < 0) return stored;
+
+  const removed = blocks[at];
+  const last = blocks[blocks.length - 1];
+  blocks[at] = last;
+  blocks.pop();
+  if (last !== removed) cache.set(flatIndex(last.pos, size), at);
+  return removed;
+}
+
+/**
+ * StoredBlock を palette index そのままで追加する。
+ * removeStoredBlock で取り出したものを、palette を共有する別の構造体
+ * (splitStructure の inner/outer) へ移すために使う。
+ */
+export function addStoredBlock(structure: Structure, block: StoredBlock): void {
+  const size = structure.getSize();
+  if (!isInside(block.pos, size)) {
+    throw new Error(`Cannot add block at ${block.pos} outside the structure bounds ${size}`);
+  }
+  const internal = structureInternals(structure);
+  const index = flatIndex(block.pos, size);
+  internal.blocks.push(block);
+  internal.blocksMap[index] = block;
+  blockPositionCache.get(structure)?.set(index, internal.blocks.length - 1);
+}
+
+/** 自身 + 6 近傍。needsCull が隣接ブロックを見るため近傍チャンクも dirty になる */
+const NEIGHBOR_OFFSETS: readonly (readonly [number, number, number])[] = [
+  [0, 0, 0],
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+/**
+ * 変更した座標群から、再メッシュが必要なチャンク座標の集合を求める。
+ *
+ * 変更ブロック自身のチャンクだけでは足りない: `needsCull` は隣接ブロックの
+ * opaque 判定を見るので、チャンク境界のブロックを足し引きすると
+ * **隣のチャンク側の面**が復活/消滅する。6 近傍を含めないと
+ * 「消したはずのブロックの面が残る」視覚バグになる (incrementalSplit.test.ts の回帰テスト参照)。
+ *
+ * 構造体の範囲外に出た近傍座標は捨てる。範囲外チャンクを渡すと
+ * ChunkBuilder.getChunk が空チャンクを遅延生成して chunks 配列が肥大するため。
+ */
+export function dirtyChunksFor(
+  positions: Iterable<readonly [number, number, number]>,
+  chunkSize: readonly [number, number, number],
+  size: readonly [number, number, number],
+): [number, number, number][] {
+  const out = new Map<string, [number, number, number]>();
+  for (const pos of positions) {
+    for (const [dx, dy, dz] of NEIGHBOR_OFFSETS) {
+      const x = pos[0] + dx;
+      const y = pos[1] + dy;
+      const z = pos[2] + dz;
+      if (!isInside([x, y, z], size)) continue;
+      const chunk: [number, number, number] = [
+        Math.floor(x / chunkSize[0]),
+        Math.floor(y / chunkSize[1]),
+        Math.floor(z / chunkSize[2]),
+      ];
+      out.set(`${chunk[0]},${chunk[1]},${chunk[2]}`, chunk);
+    }
+  }
+  return [...out.values()];
 }
 
 /** 選択範囲（両端を含む直方体、ブロック座標） */

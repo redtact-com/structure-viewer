@@ -1,4 +1,4 @@
-import type { mat4 } from "gl-matrix";
+import type { mat4, vec3 } from "gl-matrix";
 import { ChunkBuilder, Mesh, Renderer, ShaderProgram } from "deepslate/render";
 import type { Resources } from "deepslate/render";
 import type { StructureProvider } from "deepslate/core";
@@ -85,6 +85,16 @@ export interface SelectionBox {
   color: [number, number, number];
 }
 
+export interface FadeStructureRendererOptions {
+  /**
+   * ChunkBuilder のチャンクサイズ (既定 16 — 従来の挙動)。
+   * 小さくすると部分更新 (updateStructureBuffers) 1 回あたりが軽くなる代わりに
+   * draw call が増える。`deepslate` の StructureRenderer 側の `options.chunkSize`
+   * および IncrementalSplitView の `chunkSize` と揃えること。
+   */
+  chunkSize?: number | vec3;
+}
+
 /**
  * 選択範囲外のブロックを「薄く」描画するレンダラ。
  *
@@ -118,10 +128,11 @@ export class FadeStructureRenderer extends Renderer {
     // StructureRenderer 側と同じ atlas を使う場合に注入する (二重 GPU アップロード回避)。
     // 注入側でミップマップ/フィルタ設定済みであること。
     sharedAtlasTexture?: WebGLTexture,
+    options?: FadeStructureRendererOptions,
   ) {
     super(gl);
     this.resources = resources;
-    this.chunkBuilder = new ChunkBuilder(gl, structure, resources, 16);
+    this.chunkBuilder = new ChunkBuilder(gl, structure, resources, options?.chunkSize ?? 16);
     this.fadeProgram = new ShaderProgram(gl, vsFade, fsFade).getProgram();
     this.lineProgram = new ShaderProgram(gl, vsLine, fsLine).getProgram();
     this.fadeAlphaLoc = gl.getUniformLocation(this.fadeProgram, "fadeAlpha");
@@ -139,6 +150,17 @@ export class FadeStructureRenderer extends Renderer {
 
   setStructure(structure: StructureProvider) {
     this.chunkBuilder.setStructure(structure);
+  }
+
+  /**
+   * チャンクメッシュの再構築。`deepslate` の `StructureRenderer` と同じシグネチャ。
+   *
+   * `chunkPositions` を渡すとそのチャンクだけを再構築する (構造体を in-place で
+   * 書き換えた後のピック差分用)。`applyDeepslatePatches({ fastPartialChunkUpdate: true })`
+   * を併用すると走査が構造体のブロック数に依存しなくなる。
+   */
+  updateStructureBuffers(chunkPositions?: vec3[]) {
+    this.chunkBuilder.updateStructureBuffers(chunkPositions);
   }
 
   drawFadedStructure(viewMatrix: mat4, fadeAlpha: number, fadeDesat: number) {

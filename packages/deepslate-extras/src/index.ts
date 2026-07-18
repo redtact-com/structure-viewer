@@ -1,5 +1,9 @@
 export { applyDeepslatePatches, type DeepslatePatchOptions } from "./deepslatePatches";
-export { FadeStructureRenderer, type SelectionBox } from "./FadeRenderer";
+export {
+  FadeStructureRenderer,
+  type FadeStructureRendererOptions,
+  type SelectionBox,
+} from "./FadeRenderer";
 export {
   splitStructure,
   splitStructureCropped,
@@ -7,12 +11,25 @@ export {
   normalizeBlockId,
   normalizeRegion,
   structureInternals,
+  addStoredBlock,
+  removeStoredBlock,
+  storedBlockAt,
+  dirtyChunksFor,
   type CropSpec,
   type Region,
   type SelectionSpec,
   type StoredBlock,
   type StructureInternal,
 } from "./splitStructure";
+export {
+  IncrementalSplitView,
+  parsePosKey,
+  type IncrementalSplitViewOptions,
+  type SliceRange,
+  type SplitInputs,
+  type SplitRenderTarget,
+  type SplitTargets,
+} from "./incrementalSplit";
 export {
   cameraRayFromMouse,
   ddaRaycast,

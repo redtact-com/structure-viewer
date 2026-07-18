@@ -19,14 +19,29 @@
 //   (d) releaseQuadsAfterUpload (オプトイン) — GPU アップロード後に CPU 側 quads
 //       (Vertex オブジェクトグラフ) を解放し、大型構造での JS ヒープ数百 MB 残留を防ぐ。
 //       ChunkBuilder は再 setStructure 時に必ず mesh.clear() から再構築するため保持不要。
+//   (e) fastPartialChunkUpdate (オプトイン) — ChunkBuilder.updateStructureBuffers に
+//       chunkPositions を渡したときの走査を「全ブロック走査 + per-block フィルタ」から
+//       「対象チャンクの座標総当り + structure.getBlock」に変える。構造体の
+//       ブロック数 N に依存しなくなる (実測 131k ブロックで 2.3s → 30〜50ms)。
+//       chunkPositions 未指定 (全再構築) は素の実装をそのまま呼ぶ。
 //
 // 制約 / 非対応:
 // - quads 解放後の Mesh に対する merge / transform / computeNormals は no-op になる
 //   (deepslate 内の利用経路では rebuild 後にこれらを呼ぶ箇所は無い。
 //    解放は「全属性 rebuild」= ChunkBuilder のチャンクメッシュ経路のみで発動する)。
 // - ShaderProgram の再リンクは想定しない (deepslate はリンク後に再リンクしない)。
+// - (e) は ChunkBuilder の private メンバ (gl / structure / resources / chunkSize /
+//   needsCull / finishChunkMesh / getChunk) に構造的型でアクセスする。deepslate の
+//   マイナー更新で内部が変わると壊れるため、partialChunkUpdate.test.ts が
+//   「素の実装と quad 集合が一致する」ことを検証している。
+// - (e) はチャンク内の quad 並び順が素の実装 (blocks 配列順) と変わる
+//   (座標昇順になる)。deepslate はチャンク内をソートしないため描画結果は同一。
 
-import { Mesh, Renderer } from "deepslate/render";
+import { Direction } from "deepslate/core";
+import type { BlockPos, StructureProvider } from "deepslate/core";
+import type { vec3 } from "gl-matrix";
+import { ChunkBuilder, Mesh, Renderer, SpecialRenderers } from "deepslate/render";
+import type { Resources } from "deepslate/render";
 
 /** rebuild のオプション (deepslate の型と同一) */
 interface RebuildOptions {
@@ -72,11 +87,22 @@ export interface DeepslatePatchOptions {
    * 保持され、getMeshes() のフィルタ (isEmpty) も従来どおり機能する。
    */
   releaseQuadsAfterUpload?: boolean;
+  /**
+   * true にすると、`ChunkBuilder.updateStructureBuffers(chunkPositions)` を
+   * 構造体のブロック数に依存しないチャンク座標総当り版に差し替える。
+   * 出力 (チャンクごとの quad 集合) は素の実装と同一だが、チャンク内の
+   * quad 並び順が座標昇順になる (描画結果は不変)。
+   *
+   * `chunkPositions` 未指定の全再構築は常に素の実装をそのまま呼ぶため、
+   * 既定経路の挙動・性能は完全に無改変。
+   */
+  fastPartialChunkUpdate?: boolean;
 }
 
 // ── モジュール状態 ────────────────────────────────────────────
 let applied = false;
 let releaseQuadsAfterUpload = false;
+let fastPartialChunkUpdate = false;
 
 // 二重バンドル時の多重適用ガード用マーカー
 const PATCH_MARKER = "__redtactDeepslatePatched";
@@ -372,6 +398,126 @@ function patchedDrawMesh(this: RendererInternal, mesh: Mesh, options: RebuildOpt
   }
 }
 
+// ── (e) fastPartialChunkUpdate: チャンク座標総当りの部分更新 ─
+
+/** ChunkBuilder が chunks 配列に保持する 1 チャンク */
+interface ChunkMeshes {
+  mesh: Mesh;
+  transparentMesh: Mesh;
+}
+
+/** ChunkBuilder の private メンバへの構造的アクセス用 */
+interface ChunkBuilderInternal {
+  gl: WebGLRenderingContext;
+  structure: StructureProvider | undefined;
+  resources: Resources;
+  chunkSize: [number, number, number];
+  needsCull(block: PlacedBlockLike, dir: Direction): boolean;
+  finishChunkMesh(mesh: Mesh, pos: BlockPos): void;
+  getChunk(chunkPos: vec3): ChunkMeshes;
+}
+
+type PlacedBlockLike = NonNullable<ReturnType<StructureProvider["getBlock"]>>;
+
+/** ChunkBuilder がチャンクメッシュに対して常に使う rebuild オプション */
+const CHUNK_REBUILD_OPTIONS: RebuildOptions = {
+  pos: true,
+  color: true,
+  texture: true,
+  normal: true,
+  blockPos: true,
+};
+
+/** 差し替え前の updateStructureBuffers (全再構築およびオプトイン OFF 時の委譲先) */
+let originalUpdateStructureBuffers:
+  | ((this: ChunkBuilderInternal, chunkPositions?: vec3[]) => void)
+  | undefined;
+
+/**
+ * 素の実装は「全ブロックを走査してから per-block でチャンク判定」なので、
+ * 1 チャンクの更新でも O(N) の前処理 (getBlocks による PlacedBlock 再生成含む) が走る。
+ * こちらは対象チャンクの座標だけを総当りして getBlock を引くため N に依存しない。
+ *
+ * 素の実装との差:
+ * - チャンク内の quad 並びが blocks 配列順ではなく座標昇順になる (描画結果は同一)。
+ * - 同一座標に複数の StoredBlock が登録された構造体では、素の実装が両方描画するのに対し
+ *   こちらは blocksMap が指す 1 個だけを描画する (正規化済み Structure NBT では発生しない)。
+ */
+function patchedUpdateStructureBuffers(
+  this: ChunkBuilderInternal,
+  chunkPositions?: vec3[],
+): void {
+  if (!fastPartialChunkUpdate || !chunkPositions) {
+    originalUpdateStructureBuffers?.call(this, chunkPositions);
+    return;
+  }
+  const structure = this.structure;
+  if (!structure) return;
+  const chunkSize = this.chunkSize;
+  const size = structure.getSize();
+  const resources = this.resources;
+
+  for (const chunkPos of chunkPositions) {
+    const chunk = this.getChunk(chunkPos);
+    chunk.mesh.clear();
+    chunk.transparentMesh.clear();
+
+    // 構造体の範囲でクランプする (負チャンク・末端チャンクの空回りを避ける)
+    const x0 = Math.max(0, chunkPos[0] * chunkSize[0]);
+    const y0 = Math.max(0, chunkPos[1] * chunkSize[1]);
+    const z0 = Math.max(0, chunkPos[2] * chunkSize[2]);
+    const x1 = Math.min(chunkPos[0] * chunkSize[0] + chunkSize[0], size[0]);
+    const y1 = Math.min(chunkPos[1] * chunkSize[1] + chunkSize[1], size[1]);
+    const z1 = Math.min(chunkPos[2] * chunkSize[2] + chunkSize[2], size[2]);
+
+    for (let x = x0; x < x1; x++) {
+      for (let y = y0; y < y1; y++) {
+        for (let z = z0; z < z1; z++) {
+          const b = structure.getBlock([x, y, z]);
+          if (!b) continue;
+          const blockName = b.state.getName();
+          try {
+            const blockProps = b.state.getProperties();
+            const defaultProps = resources.getDefaultBlockProperties(blockName) ?? {};
+            for (const k of Object.keys(defaultProps)) {
+              if (!blockProps[k]) blockProps[k] = defaultProps[k];
+            }
+            const blockDefinition = resources.getBlockDefinition(blockName);
+            const cull = {
+              up: this.needsCull(b, Direction.UP),
+              down: this.needsCull(b, Direction.DOWN),
+              west: this.needsCull(b, Direction.WEST),
+              east: this.needsCull(b, Direction.EAST),
+              north: this.needsCull(b, Direction.NORTH),
+              south: this.needsCull(b, Direction.SOUTH),
+            };
+            const mesh = new Mesh();
+            if (blockDefinition) {
+              mesh.merge(
+                blockDefinition.getMesh(blockName, blockProps, resources, resources, cull),
+              );
+            }
+            const specialMesh = SpecialRenderers.getBlockMesh(b.state, b.nbt, resources, cull);
+            if (!specialMesh.isEmpty()) mesh.merge(specialMesh);
+            if (!mesh.isEmpty()) {
+              this.finishChunkMesh(mesh, b.pos);
+              if (resources.getBlockFlags(blockName)?.semi_transparent) {
+                chunk.transparentMesh.merge(mesh);
+              } else {
+                chunk.mesh.merge(mesh);
+              }
+            }
+          } catch (e) {
+            console.error(`Error rendering block ${blockName}`, e);
+          }
+        }
+      }
+    }
+    chunk.mesh.rebuild(this.gl, CHUNK_REBUILD_OPTIONS);
+    chunk.transparentMesh.rebuild(this.gl, CHUNK_REBUILD_OPTIONS);
+  }
+}
+
 // ── 適用 ─────────────────────────────────────────────────────
 
 /**
@@ -382,6 +528,9 @@ function patchedDrawMesh(this: RendererInternal, mesh: Mesh, options: RebuildOpt
 export function applyDeepslatePatches(options?: DeepslatePatchOptions): void {
   if (options?.releaseQuadsAfterUpload !== undefined) {
     releaseQuadsAfterUpload = options.releaseQuadsAfterUpload;
+  }
+  if (options?.fastPartialChunkUpdate !== undefined) {
+    fastPartialChunkUpdate = options.fastPartialChunkUpdate;
   }
   // Mesh の this 型 (clear(): this 等) と衝突しないよう構造的 Record 経由で差し替える
   const meshProto = Mesh.prototype as unknown as Record<string, unknown>;
@@ -405,6 +554,13 @@ export function applyDeepslatePatches(options?: DeepslatePatchOptions): void {
   rendererProto.setUniform = patchedSetUniform;
   rendererProto.prepareDraw = patchedPrepareDraw;
   rendererProto.drawMesh = patchedDrawMesh;
+
+  // (e) 素の実装を退避してから差し替える (全再構築・オプトイン OFF 時はこちらに委譲)
+  const chunkBuilderProto = ChunkBuilder.prototype as unknown as {
+    updateStructureBuffers(this: ChunkBuilderInternal, chunkPositions?: vec3[]): void;
+  };
+  originalUpdateStructureBuffers = chunkBuilderProto.updateStructureBuffers;
+  chunkBuilderProto.updateStructureBuffers = patchedUpdateStructureBuffers;
 
   meshProto[PATCH_MARKER] = true;
   applied = true;

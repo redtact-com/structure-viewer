@@ -50,6 +50,61 @@ applyDeepslatePatches({ releaseQuadsAfterUpload: true });
 - `Renderer`: attribute/uniform location caching per program.
 - `releaseQuadsAfterUpload` (opt-in): frees CPU-side quad graphs after GPU
   upload, saving hundreds of MB of JS heap on large structures.
+- `fastPartialChunkUpdate` (opt-in): makes
+  `ChunkBuilder.updateStructureBuffers(chunkPositions)` scan only the requested
+  chunks' coordinates instead of every block in the structure. See
+  [Incremental chunk updates](#incremental-chunk-updates). The full-rebuild path
+  (no `chunkPositions`) is left completely untouched.
+
+### Incremental chunk updates
+
+Re-splitting a structure and calling `setStructure` on both renderers costs a
+full re-mesh — about 1.8 s for a 131k-block structure, which is a visible freeze
+if it happens on every picked block. `IncrementalSplitView` instead moves the
+picked blocks between the two structures in place and re-meshes only the chunks
+that actually changed (the block's own chunk plus its 6 neighbours, because face
+culling looks at adjacent blocks).
+
+```ts
+import {
+  applyDeepslatePatches,
+  IncrementalSplitView,
+} from "@redtact/deepslate-extras";
+
+applyDeepslatePatches({ fastPartialChunkUpdate: true });
+
+const view = new IncrementalSplitView(
+  structure,
+  { specs, crop: null, slice: null },
+  { inner: structureRenderer, outer: fadeRenderer },
+  { chunkSize: 16 }, // must match the renderers' ChunkBuilder chunk size
+);
+
+// One picked block: returns the number of chunks re-meshed.
+const inputs = { specs, crop: null, slice: null };
+if (view.toggle(["3,4,5"], true, inputs) < 0) {
+  // -1 = too many dirty chunks, or the caller's specs/crop/slice changed.
+  // Nothing was applied; fall back to a full rebuild.
+  view.resplit(specs, crop, slice);
+}
+```
+
+Passing `inputs` to `toggle` is strongly recommended: the view compares it with
+the signature it last split on, and forces a `resplit` if they disagree, so a
+bug in the caller's change detection cannot leave the screen out of sync with
+the application state.
+
+Bench (`node tools/bench-viewer.mjs --size 64`, 131k blocks, `chunkSize: 16`):
+one picked block goes from **1776 ms** (full re-mesh of both renderers) to
+**48.5 ms**, and a 865-block drag selection takes 191 ms across 8 dirty chunks.
+
+The underlying pieces are exported for direct use: `removeStoredBlock` /
+`addStoredBlock` / `storedBlockAt` move `deepslate` `Structure` entries in place
+(keeping `blocks` and `blocksMap` consistent), and `dirtyChunksFor` computes the
+chunk set to re-mesh, clamped to the structure bounds.
+
+`FadeStructureRenderer` gained a matching `updateStructureBuffers(chunkPositions?)`
+passthrough and an optional `chunkSize` option.
 
 ### Render loop
 

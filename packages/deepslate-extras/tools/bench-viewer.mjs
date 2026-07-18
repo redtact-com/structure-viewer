@@ -16,6 +16,8 @@
 //   [4] splitStructure + inner/outer 2 レンダラ — フォーカス表示の実経路
 //   [5] getMeshes() x100                       — draw loop 毎フレームコスト
 //   [6] ヒープ残留 (heapUsed)                   — releaseQuadsAfterUpload の効果
+//   [7] 部分更新 (ピック / ドラッグ)             — 全再構築 vs 影響チャンクだけ再メッシュ。
+//                                                patch (e) の有無も同一条件で A/B する
 //
 // 実装メモ: パッチ実体 (src/deepslatePatches.ts) を直接 import するため、
 // node の型ストリップ (--experimental-strip-types) が必要。未指定で起動された場合は
@@ -59,11 +61,20 @@ const { NbtCompound, NbtFile, NbtInt, NbtList, NbtString, NbtType } = await impo
 );
 const { BlockDefinition, BlockModel, ChunkBuilder } = await import("deepslate/render");
 
+const { applyDeepslatePatches } = await import("../src/deepslatePatches.ts");
 if (!noPatch) {
-  // ビューアーと同じ設定 (quads 解放込み) で適用する
-  const { applyDeepslatePatches } = await import("../src/deepslatePatches.ts");
-  applyDeepslatePatches({ releaseQuadsAfterUpload: true });
+  // ビューアーと同じ設定 (quads 解放 + 部分更新の高速化) で適用する
+  applyDeepslatePatches({ releaseQuadsAfterUpload: true, fastPartialChunkUpdate: true });
 }
+
+// 部分更新ベンチ用のヘルパ (relative import を持たないので type-strip でそのまま読める)
+const {
+  addStoredBlock,
+  dirtyChunksFor,
+  removeStoredBlock,
+  splitStructure: librarySplitStructure,
+  structureInternals,
+} = await import("../src/splitStructure.ts");
 
 const now = () => performance.now();
 const fmt = (ms) => `${ms.toFixed(1)}ms`;
@@ -286,4 +297,110 @@ console.log(`  [5] getMeshes() x100 (draw loop)  : ${fmt(now() - t)}`);
 console.log(
   `  [6] mesh ヒープ残留 (cb1 個分)     : ${mb(heapAfterBuild - heapBefore)}${globalThis.gc ? "" : " (--expose-gc なしのため参考値)"}`,
 );
+// [7] 部分更新 (ピック / ドラッグ) — 「全再構築 vs 影響チャンクだけ再メッシュ」
+//
+// ここが本題: ピック 1 個で inner/outer を作り直すと全 re-mesh になるため
+// 131k ブロックで数秒のフリーズになる。IncrementalSplitView.toggle と同じ手順
+// (StoredBlock を in-place で移す → 6 近傍込みの dirty チャンクだけ再メッシュ) を
+// インラインで再現して比較する (IncrementalSplitView 自体は relative import を
+// 持つため node の type-strip から直接 import できない)。
+//
+// patch (e) の有無は同一のピック座標・同一の初期状態で A/B する。
+{
+  const mid = Math.floor(S / 2);
+  const CS = 16;
+  const chunkSize = [CS, CS, CS];
+  const size = [S, S, S];
+  const pickSpec = {
+    region: { start: [0, 0, 0], end: [mid - 1, S - 1, S - 1] },
+    materials: null,
+  };
+
+  // 両方の計測で使う共通のピック座標 (outer 側の実在ブロックを決定的に 21 個)
+  const reference = librarySplitStructure(structure, [pickSpec]);
+  const candidates = structureInternals(reference.outer)
+    .blocks.filter((b) => b.pos[0] > mid + 1)
+    .map((b) => b.pos);
+  const step = Math.max(1, Math.floor(candidates.length / 22));
+  const pickPositions = [];
+  for (let i = 0; i < candidates.length && pickPositions.length < 21; i += step) {
+    pickPositions.push(candidates[i]);
+  }
+  // ドラッグ確定相当: チャンク境界をまたぐ 12^3 の直方体
+  const dragPositions = [];
+  for (let x = mid + 8; x < Math.min(mid + 20, S); x++) {
+    for (let y = 10; y < Math.min(22, S); y++) {
+      for (let z = 10; z < Math.min(22, S); z++) {
+        if (reference.outer.getBlock([x, y, z])) dragPositions.push([x, y, z]);
+      }
+    }
+  }
+
+  function measurePartial(fastPartial) {
+    if (!noPatch) applyDeepslatePatches({ fastPartialChunkUpdate: fastPartial });
+    const split = librarySplitStructure(structure, [pickSpec]);
+    const cbI = new ChunkBuilder(makeStubGl(), split.inner, res, CS);
+    const cbO = new ChunkBuilder(makeStubGl(), split.outer, res, CS);
+    const toggle = (positions) => {
+      for (const pos of positions) {
+        const stored = removeStoredBlock(split.outer, pos);
+        if (stored) addStoredBlock(split.inner, stored);
+      }
+      const dirty = dirtyChunksFor(positions, chunkSize, size);
+      cbI.updateStructureBuffers(dirty);
+      cbO.updateStructureBuffers(dirty);
+      return dirty.length;
+    };
+
+    // ベースライン: 現行フロー (両レンダラ setStructure = 全チャンク再構築)
+    let t0 = now();
+    cbI.setStructure(split.inner);
+    cbO.setStructure(split.outer);
+    const fullRemeshMs = now() - t0;
+
+    const times = [];
+    let chunks = 0;
+    for (const pos of pickPositions) {
+      t0 = now();
+      chunks += toggle([pos]);
+      times.push(now() - t0);
+    }
+    t0 = now();
+    const dragChunks = toggle(dragPositions);
+    const dragMs = now() - t0;
+
+    // 1 回目は blocks 配列の位置キャッシュ構築 (O(N) 1 回だけ) を含むので分けて出す
+    const warm = times.slice(1);
+    return {
+      fullRemeshMs,
+      coldMs: times[0],
+      pickMs: warm.reduce((a, b) => a + b, 0) / warm.length,
+      picks: warm.length,
+      chunksPerPick: chunks / times.length,
+      dragMs,
+      dragChunks,
+    };
+  }
+
+  const fast = measurePartial(true);
+  console.log(
+    `  [7] ピック 1 個: 全再構築 ${fmt(fast.fullRemeshMs)} → 部分更新 ${fmt(fast.pickMs)}` +
+      ` (${(fast.fullRemeshMs / fast.pickMs).toFixed(0)}x, 影響チャンク平均 ${fast.chunksPerPick.toFixed(1)}, ${fast.picks} 回平均)`,
+  );
+  console.log(`      うち 1 回目 (位置キャッシュ構築込み) : ${fmt(fast.coldMs)}`);
+  console.log(
+    `      ドラッグ ${String(dragPositions.length).padStart(4)} ブロック    : ${fmt(fast.dragMs)} (影響チャンク ${fast.dragChunks})`,
+  );
+  if (!noPatch) {
+    // patch (e) 単体の効果: 素の updateStructureBuffers(chunkPositions) は
+    // 全ブロック走査 + per-block フィルタなので構造体のブロック数に比例する
+    const slow = measurePartial(false);
+    applyDeepslatePatches({ fastPartialChunkUpdate: true });
+    console.log(
+      `      patch (e) OFF (素の全ブロック走査)   : ピック ${fmt(slow.pickMs)} / ドラッグ ${fmt(slow.dragMs)}` +
+        ` → (e) で ${((slow.pickMs / fast.pickMs - 1) * 100).toFixed(0)}% 短縮`,
+    );
+  }
+}
+
 console.log("done");
