@@ -13,12 +13,15 @@
 // 描画結果は同一 (集合が一致すれば等価)。
 import { beforeEach, describe, expect, it } from "vitest";
 import { Structure } from "deepslate/core";
-import { ChunkBuilder } from "deepslate/render";
+import type { BlockPos, StructureProvider } from "deepslate/core";
+import { ChunkBuilder, Mesh } from "deepslate/render";
+import type { Resources } from "deepslate/render";
 import type { vec3 } from "gl-matrix";
 
 import { applyDeepslatePatches } from "./deepslatePatches";
 import { dirtyChunksFor, removeStoredBlock, storedBlockAt } from "./splitStructure";
 import {
+  FIXTURE_NAMES,
   buildFixtureStructure,
   chunkQuadSets,
   createMockGl,
@@ -218,5 +221,143 @@ describe("(e) fastPartialChunkUpdate", () => {
     cb.updateStructureBuffers([[0, 0, 0]] as unknown as vec3[]);
     expect(chunkQuadSets(cb, buffers).size).toBe(0);
     expect(cb.getMeshes().length).toBe(0);
+  });
+
+  // ── 走査範囲のエッジケース (issue のレビューで追加) ──
+
+  describe("チャンクサイズと構造サイズの組み合わせ", () => {
+    /** 任意サイズ・任意チャンクサイズで「部分更新 == 素の実装」を確認する */
+    function expectPartialMatchesStock(
+      structureSize: [number, number, number],
+      chunkSize: number | [number, number, number],
+    ) {
+      const make = () => {
+        const s = new Structure(structureSize);
+        let i = 0;
+        for (let x = 0; x < structureSize[0]; x++) {
+          for (let y = 0; y < structureSize[1]; y++) {
+            for (let z = 0; z < structureSize[2]; z++) {
+              if ((x * 7 + y * 13 + z * 17) % 3 === 0) continue;
+              s.addBlock([x, y, z], FIXTURE_NAMES[i++ % FIXTURE_NAMES.length]);
+            }
+          }
+        }
+        return s;
+      };
+      const buildWith = (structure: Structure) => {
+        const { gl, buffers } = createMockGl();
+        return { structure, cb: new ChunkBuilder(gl, structure, resources, chunkSize), buffers };
+      };
+      const cs = typeof chunkSize === "number" ? [chunkSize, chunkSize, chunkSize] : chunkSize;
+      const fast = buildWith(make());
+      const reference = buildWith(make());
+
+      // 構造体の端 (クランプが効く場所) を含む座標を落とす
+      const candidates: [number, number, number][] = [
+        [0, 0, 0],
+        [structureSize[0] - 1, structureSize[1] - 1, structureSize[2] - 1],
+        [Math.min(cs[0], structureSize[0] - 1), 0, 0],
+      ];
+      const targets = candidates.filter((pos) => storedBlockAt(fast.structure, pos));
+      expect(targets.length).toBeGreaterThan(0);
+      for (const pos of targets) {
+        removeStoredBlock(fast.structure, pos);
+        removeStoredBlock(reference.structure, pos);
+      }
+      const dirty = dirtyChunksFor(
+        targets,
+        cs as [number, number, number],
+        structureSize,
+      ) as unknown as vec3[];
+      fast.cb.updateStructureBuffers(dirty);
+      originalUpdateStructureBuffers.call(reference.cb, dirty);
+      expect(
+        diffChunkQuadSets(
+          chunkQuadSets(fast.cb, fast.buffers),
+          chunkQuadSets(reference.cb, reference.buffers),
+        ),
+      ).toBeNull();
+    }
+
+    it("チャンクサイズが構造サイズを割り切らない (13x7x21 / cs=8)", () => {
+      expectPartialMatchesStock([13, 7, 21], 8);
+    });
+
+    it("構造体が 1 チャンクより薄い (17x3x5 / cs=16)", () => {
+      expectPartialMatchesStock([17, 3, 5], 16);
+    });
+
+    it("非等方チャンクサイズ (9x9x9 / cs=[4,8,16])", () => {
+      expectPartialMatchesStock([9, 9, 9], [4, 8, 16]);
+    });
+
+    it("チャンクサイズ 1 (2x2x2 / cs=1)", () => {
+      expectPartialMatchesStock([2, 2, 2], 1);
+    });
+  });
+
+  it("Structure 以外の StructureProvider には適用せず素の実装に委譲する", () => {
+    // 0 起点でない provider は座標総当りでは拾えない。素の実装は getBlocks() を
+    // 全走査するので拾える。型で分岐して安全側に倒していることを確認する。
+    const blocks = [
+      { pos: [-2, 0, 0] as BlockPos, name: "minecraft:stone" },
+      { pos: [1, 0, 0] as BlockPos, name: "minecraft:stone" },
+    ];
+    const backing = new Structure([4, 4, 4]);
+    backing.addBlock([0, 0, 0], "minecraft:stone");
+    const state = backing.getBlock([0, 0, 0])!.state;
+    const provider: StructureProvider = {
+      getSize: () => [4, 4, 4] as BlockPos,
+      getBlocks: () => blocks.map((b) => ({ pos: b.pos, state })),
+      getBlock: (pos: BlockPos) => {
+        const hit = blocks.find(
+          (b) => b.pos[0] === pos[0] && b.pos[1] === pos[1] && b.pos[2] === pos[2],
+        );
+        return hit ? { pos: hit.pos, state } : null;
+      },
+    };
+    const { gl, buffers } = createMockGl();
+    const cb = new ChunkBuilder(gl, provider, resources, 2);
+    cb.updateStructureBuffers([
+      [-1, 0, 0],
+      [0, 0, 0],
+    ] as unknown as vec3[]);
+    const chunks = [...chunkQuadSets(cb, buffers).keys()];
+    // 負チャンク (getChunk の符号エンコードで x=3) が残っていること
+    expect(chunks.some((k) => k.startsWith("3,0,0"))).toBe(true);
+    expect(chunks.some((k) => k.startsWith("0,0,0"))).toBe(true);
+  });
+
+  it("設定は prototype 上の共有オブジェクトに置かれる (ESM/CJS 二重インスタンス対策)", () => {
+    // モジュールのコピーが 2 つあると、後から applyDeepslatePatches を呼んだ側の
+    // 指定が prototype に載っている側に届かない。設定を prototype 上に置くことで
+    // 「どのコピーから設定しても効く」ことを、外部から直接書き換えて確認する。
+    const config = (Mesh.prototype as unknown as Record<string, { fastPartialChunkUpdate: boolean }>)
+      .__redtactDeepslateConfig;
+    expect(config).toBeDefined();
+
+    const structure = buildFixtureStructure(SIZE);
+    let getBlocksCalls = 0;
+    const originalGetBlocks = structure.getBlocks.bind(structure);
+    structure.getBlocks = () => {
+      getBlocksCalls++;
+      return originalGetBlocks();
+    };
+    const { gl } = createMockGl();
+    const cb = new ChunkBuilder(gl, structure, resources, CHUNK_SIZE);
+
+    // 高速経路は getBlocks を呼ばない
+    getBlocksCalls = 0;
+    cb.updateStructureBuffers([[0, 0, 0]] as unknown as vec3[]);
+    expect(getBlocksCalls).toBe(0);
+
+    // 共有オブジェクトを直接書き換えると素の経路に戻る (= 別コピーからの設定も効く)
+    config.fastPartialChunkUpdate = false;
+    try {
+      cb.updateStructureBuffers([[0, 0, 0]] as unknown as vec3[]);
+      expect(getBlocksCalls).toBeGreaterThan(0);
+    } finally {
+      config.fastPartialChunkUpdate = true;
+    }
   });
 });

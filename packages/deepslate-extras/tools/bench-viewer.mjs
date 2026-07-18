@@ -369,7 +369,7 @@ console.log(
     const dragChunks = toggle(dragPositions);
     const dragMs = now() - t0;
 
-    // 1 回目は blocks 配列の位置キャッシュ構築 (O(N) 1 回だけ) を含むので分けて出す
+    // 1 回目は blocks 配列の昇順判定 (O(N) 1 回だけ) を含むので分けて出す
     const warm = times.slice(1);
     return {
       fullRemeshMs,
@@ -387,7 +387,7 @@ console.log(
     `  [7] ピック 1 個: 全再構築 ${fmt(fast.fullRemeshMs)} → 部分更新 ${fmt(fast.pickMs)}` +
       ` (${(fast.fullRemeshMs / fast.pickMs).toFixed(0)}x, 影響チャンク平均 ${fast.chunksPerPick.toFixed(1)}, ${fast.picks} 回平均)`,
   );
-  console.log(`      うち 1 回目 (位置キャッシュ構築込み) : ${fmt(fast.coldMs)}`);
+  console.log(`      うち 1 回目 (昇順判定 O(N) 込み)     : ${fmt(fast.coldMs)}`);
   console.log(
     `      ドラッグ ${String(dragPositions.length).padStart(4)} ブロック    : ${fmt(fast.dragMs)} (影響チャンク ${fast.dragChunks})`,
   );

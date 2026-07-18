@@ -105,6 +105,12 @@ export interface FadeStructureRendererOptions {
  */
 export class FadeStructureRenderer extends Renderer {
   private readonly chunkBuilder: ChunkBuilder;
+  /**
+   * この ChunkBuilder のチャンクサイズ。`IncrementalSplitView` が構築時に
+   * 自分の設定と突き合わせるために読む (不一致だと部分更新が別のチャンクを
+   * 再構築してしまい、「特定のブロックだけ消せない」形のバグになる)。
+   */
+  readonly chunkSize: readonly [number, number, number];
   private readonly fadeProgram: WebGLProgram;
   private readonly lineProgram: WebGLProgram;
   private readonly atlasTexture: WebGLTexture;
@@ -132,7 +138,12 @@ export class FadeStructureRenderer extends Renderer {
   ) {
     super(gl);
     this.resources = resources;
-    this.chunkBuilder = new ChunkBuilder(gl, structure, resources, options?.chunkSize ?? 16);
+    const chunkSize = options?.chunkSize ?? 16;
+    this.chunkSize =
+      typeof chunkSize === "number"
+        ? [chunkSize, chunkSize, chunkSize]
+        : [chunkSize[0], chunkSize[1], chunkSize[2]];
+    this.chunkBuilder = new ChunkBuilder(gl, structure, resources, chunkSize);
     this.fadeProgram = new ShaderProgram(gl, vsFade, fsFade).getProgram();
     this.lineProgram = new ShaderProgram(gl, vsLine, fsLine).getProgram();
     this.fadeAlphaLoc = gl.getUniformLocation(this.fadeProgram, "fadeAlpha");

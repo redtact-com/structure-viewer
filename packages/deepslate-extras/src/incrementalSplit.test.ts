@@ -42,22 +42,30 @@ const SIZE = 32;
 const CHUNK_SIZE = 8;
 const resources = createMockResources();
 
-/** ChunkBuilder を持つ SplitRenderTarget (実物のレンダラと同じ経路を通す) */
+/**
+ * ChunkBuilder を持つ SplitRenderTarget (実物のレンダラと同じ経路を通す)。
+ * `log` に呼び出し履歴を残すので「内部で resplit していないか」を検証できる。
+ */
 class TestTarget implements SplitRenderTarget {
   readonly cb: ChunkBuilder;
   readonly buffers: ReturnType<typeof createMockGl>["buffers"];
+  readonly chunkSize: readonly [number, number, number];
+  readonly log: string[] = [];
 
-  constructor() {
+  constructor(chunkSize = CHUNK_SIZE) {
     const { gl, buffers } = createMockGl();
     this.buffers = buffers;
-    this.cb = new ChunkBuilder(gl, new Structure([SIZE, SIZE, SIZE]), resources, CHUNK_SIZE);
+    this.chunkSize = [chunkSize, chunkSize, chunkSize];
+    this.cb = new ChunkBuilder(gl, new Structure([SIZE, SIZE, SIZE]), resources, chunkSize);
   }
 
   setStructure(structure: Parameters<ChunkBuilder["setStructure"]>[0]) {
+    this.log.push("set");
     this.cb.setStructure(structure);
   }
 
   updateStructureBuffers(chunkPositions?: vec3[]) {
+    this.log.push(`update:${chunkPositions?.length ?? "all"}`);
     this.cb.updateStructureBuffers(chunkPositions);
   }
 
@@ -83,22 +91,32 @@ function makeInputs(overrides?: Partial<SplitInputs>): SplitInputs {
   return { specs: [REGION_SPEC], crop: null, slice: null, ...overrides };
 }
 
+/**
+ * ピックモードの specs。positions が非空の spec は region/materials を無視するので、
+ * 差分が通るのは「positions 非空のまま中身だけ変わる」区間だけ。
+ * 0 個 ⇄ 1 個 の遷移は分割の意味論が変わるため必ず resplit になる (仕様)。
+ */
+function specsWith(positions: readonly string[]): SelectionSpec[] {
+  return [{ region: null, materials: null, positions: [...positions] }];
+}
+
+function pickInputs(positions: readonly string[], overrides?: Partial<SplitInputs>): SplitInputs {
+  return { specs: specsWith(positions), crop: null, slice: null, ...overrides };
+}
+
 function makeView(full: Structure, inputs = makeInputs()) {
   const targets = { inner: new TestTarget(), outer: new TestTarget() };
   const view = new IncrementalSplitView(full, inputs, targets, { chunkSize: CHUNK_SIZE });
   return { view, targets };
 }
 
-/** 差分適用後の最終状態 = region spec ∪ picked positions を full 再構築したもの */
+/** 差分適用後の最終状態 = picked positions を full 再構築したもの */
 function expectMatchesFullRebuild(
   full: Structure,
-  picked: string[],
+  picked: readonly string[],
   targets: { inner: TestTarget; outer: TestTarget },
 ) {
-  const reference = splitStructure(full, [
-    REGION_SPEC,
-    { region: null, materials: null, positions: picked },
-  ]);
+  const reference = splitStructure(full, specsWith(picked));
   expect(diffChunkQuadSets(targets.inner.quadSets(), referenceQuadSets(reference.inner))).toBeNull();
   expect(diffChunkQuadSets(targets.outer.quadSets(), referenceQuadSets(reference.outer))).toBeNull();
 }
@@ -151,15 +169,20 @@ describe("IncrementalSplitView", () => {
           applyDeepslatePatches({ fastPartialChunkUpdate: fastPartial });
           try {
             const full = buildFixtureStructure(SIZE, 0.4);
-            const { view, targets } = makeView(full);
             const picks = choosePicks(full, mode, 25, seed);
             expect(picks.length).toBeGreaterThan(4);
+            // 1 個目でピックモードに入った状態から差分を始める
+            const applied = [picks[0]];
+            const { view, targets } = makeView(full, pickInputs(applied));
 
-            for (const key of picks) {
-              expect(view.toggle([key], true, makeInputs())).toBeGreaterThan(0);
+            for (const key of picks.slice(1)) {
+              applied.push(key);
+              const result = view.toggle([key], true, pickInputs(applied));
+              expect(result.status).toBe("applied");
+              expect(result.chunks).toBeGreaterThan(0);
             }
             expect(view.verifyConsistency()).toBeNull();
-            expectMatchesFullRebuild(full, picks, targets);
+            expectMatchesFullRebuild(full, applied, targets);
           } finally {
             applyDeepslatePatches({ fastPartialChunkUpdate: true });
           }
@@ -170,22 +193,27 @@ describe("IncrementalSplitView", () => {
 
   it("まとめてトグル (ドラッグ確定相当) でも full 再構築と一致する", () => {
     const full = buildFixtureStructure(SIZE, 0.4);
-    const { view, targets } = makeView(full);
     const picks = choosePicks(full, "ランダム", 20, 77);
-    expect(view.toggle(picks, true, makeInputs())).toBeGreaterThan(0);
+    const { view, targets } = makeView(full, pickInputs([picks[0]]));
+    const rest = picks.slice(1);
+    const result = view.toggle(rest, true, pickInputs(picks));
+    expect(result.status).toBe("applied");
+    expect(result.moved).toBe(rest.length);
     expect(view.verifyConsistency()).toBeNull();
     expectMatchesFullRebuild(full, picks, targets);
   });
 
   it("トグルを戻す (add=false) と元の分割に戻る", () => {
     const full = buildFixtureStructure(SIZE, 0.4);
-    const { view, targets } = makeView(full);
+    const picks = choosePicks(full, "チャンク境界", 11, 55);
+    const seedKeys = [picks[0]];
+    const rest = picks.slice(1);
+    const { view, targets } = makeView(full, pickInputs(seedKeys));
     const baselineInner = targets.inner.quadSets();
     const baselineOuter = targets.outer.quadSets();
 
-    const picks = choosePicks(full, "チャンク境界", 10, 55);
-    view.toggle(picks, true, makeInputs());
-    view.toggle(picks, false, makeInputs());
+    expect(view.toggle(rest, true, pickInputs(picks)).status).toBe("applied");
+    expect(view.toggle(rest, false, pickInputs(seedKeys)).status).toBe("applied");
 
     expect(view.verifyConsistency()).toBeNull();
     expect(diffChunkQuadSets(targets.inner.quadSets(), baselineInner)).toBeNull();
@@ -248,48 +276,70 @@ describe("IncrementalSplitView", () => {
   });
 
   describe("戻り値と自己検証", () => {
-    it("空 / 不正キー / 対象外の座標は 0 を返す (再メッシュしない)", () => {
+    it("空 / 不正キー / 対象外の座標は noop を返す (再メッシュしない)", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
-      const { view } = makeView(full);
-      expect(view.toggle([], true, makeInputs())).toBe(0);
-      expect(view.toggle(["こわれたキー"], true, makeInputs())).toBe(0);
-      expect(view.toggle(["1,2"], true, makeInputs())).toBe(0);
-      // 空気の座標 / 既に inner 側にある座標
-      expect(view.toggle(["999,999,999"], true, makeInputs())).toBe(0);
-      expect(view.toggle(["0,0,0"], true, makeInputs())).toBe(0);
+      const seed = choosePicks(full, "ランダム", 1, 1);
+      const { view } = makeView(full, pickInputs(seed));
+      expect(view.toggle([], true, pickInputs(seed))).toMatchObject({
+        status: "noop",
+        skipped: 0,
+      });
+      // 不正キー / 空気の座標は skipped として報告する
+      expect(view.toggle(["こわれたキー"], true, pickInputs([...seed, "こわれたキー"]))).toMatchObject({
+        status: "noop",
+        skipped: 1,
+      });
+      expect(
+        view.toggle(["999,999,999"], true, pickInputs([...seed, "こわれたキー", "999,999,999"])),
+      ).toMatchObject({ status: "noop", skipped: 1 });
     });
 
-    it("dirty チャンクが閾値を超えたら -1 を返し、構造体を一切変更しない", () => {
+    it("【M3】閾値超過は needs-resplit(threshold) を返し、内部で resplit しない", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
+      const picks = choosePicks(full, "ランダム", 25, 99);
       const targets = { inner: new TestTarget(), outer: new TestTarget() };
-      const view = new IncrementalSplitView(full, makeInputs(), targets, {
+      const view = new IncrementalSplitView(full, pickInputs([picks[0]]), targets, {
         chunkSize: CHUNK_SIZE,
         fullRebuildChunkThreshold: 2,
       });
       const before = targets.outer.quadSets();
-      const picks = choosePicks(full, "ランダム", 25, 99);
+      targets.inner.log.length = 0;
+      targets.outer.log.length = 0;
 
-      expect(view.toggle(picks, true, makeInputs())).toBe(-1);
-      // 未変更であること (呼び出し側が resplit する前提)
-      for (const key of picks) {
+      const result = view.toggle(picks.slice(1), true, pickInputs(picks));
+      expect(result).toMatchObject({ status: "needs-resplit", reason: "threshold", chunks: 0 });
+      // ビューは完全に無変更 (setStructure も updateStructureBuffers も呼ばれない)
+      expect(targets.inner.log).toEqual([]);
+      expect(targets.outer.log).toEqual([]);
+      for (const key of picks.slice(1)) {
         expect(storedBlockAt(view.outer, parsePosKey(key)!)).not.toBeNull();
       }
       expect(diffChunkQuadSets(targets.outer.quadSets(), before)).toBeNull();
     });
 
-    it("構造シグネチャが食い違ったら強制 resplit して -1 を返す", () => {
+    it("【M3】構造シグネチャ不一致でも内部 resplit せず needs-resplit(structure) を返す", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
-      const { view, targets } = makeView(full);
+      const { view, targets } = makeView(full, pickInputs(choosePicks(full, "ランダム", 1, 2)));
+      targets.inner.log.length = 0;
+      targets.outer.log.length = 0;
 
-      // 呼び出し側の specs が変わったのに差分経路に来てしまったケース
       const changed: SelectionSpec = {
         region: { start: [0, 0, 0], end: [3, SIZE - 1, SIZE - 1] },
         materials: null,
       };
       const picks = choosePicks(full, "ランダム", 3, 5);
-      expect(view.toggle(picks, true, { specs: [changed] })).toBe(-1);
+      const next: SplitInputs = { specs: [changed], crop: null, slice: null };
+      expect(view.toggle(picks, true, next)).toMatchObject({
+        status: "needs-resplit",
+        reason: "structure",
+      });
+      // 0.2.0 はここで内部 resplit していたため、呼び出し側と合わせて全再構築が 2 回走った
+      expect(targets.inner.log).toEqual([]);
+      expect(targets.outer.log).toEqual([]);
 
-      // 新しい specs で再分割済み = 画面が乖離しない
+      // 呼び出し側が 1 回だけ resplit すれば正しくなる
+      view.resplit(next);
+      expect(targets.inner.log).toEqual(["set"]);
       const reference = splitStructure(full, [changed]);
       expect(
         diffChunkQuadSets(targets.inner.quadSets(), referenceQuadSets(reference.inner)),
@@ -297,32 +347,108 @@ describe("IncrementalSplitView", () => {
       expect(view.verifyConsistency()).toBeNull();
     });
 
-    it("positions が空になる遷移 (ピックモード解除) もシグネチャ不一致として検出する", () => {
+    it("【M3】最後の 1 個を解除する遷移 (positions 1→0) でも全再構築は 1 回だけ", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
-      const withPositions = makeInputs({
-        specs: [{ region: null, materials: null, positions: ["12,0,0"] }],
+      const key = choosePicks(full, "ランダム", 1, 3)[0];
+      const { view, targets } = makeView(full, pickInputs([key]));
+
+      targets.inner.log.length = 0;
+      targets.outer.log.length = 0;
+      // positions 1 → 0 は分割の意味論が変わるので needs-resplit になる
+      const cleared = pickInputs([]);
+      expect(view.toggle([key], false, cleared)).toMatchObject({
+        status: "needs-resplit",
+        reason: "structure",
       });
-      const { view } = makeView(full, withPositions);
-      const withoutPositions = makeInputs({
-        specs: [{ region: null, materials: null, positions: [] }],
-      });
-      expect(view.toggle(["13,0,0"], true, withoutPositions)).toBe(-1);
+      expect(targets.inner.log).toEqual([]);
+      view.resplit(cleared);
+      // setStructure は inner/outer 各 1 回だけ = 全再構築 1 回
+      expect(targets.inner.log).toEqual(["set"]);
+      expect(targets.outer.log).toEqual(["set"]);
     });
 
-    it("expected を渡さなければシグネチャ検証をせずに差分適用する", () => {
+    it("【M2】positions の総入れ替えを検出して needs-resplit(positions) を返す", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
-      const { view, targets } = makeView(full);
-      const picks = choosePicks(full, "ランダム", 5, 8);
-      expect(view.toggle(picks, true)).toBeGreaterThan(0);
-      expectMatchesFullRebuild(full, picks, targets);
+      const [a, b] = choosePicks(full, "ランダム", 2, 42);
+      const { view, targets } = makeView(full, pickInputs([a]));
+      expect(storedBlockAt(view.inner, parsePosKey(a)!)).not.toBeNull();
+
+      targets.inner.log.length = 0;
+      // 無修飾クリック = 選択の置換。アプリ state は [b] になっているが
+      // 差分としては「b を追加」しか渡ってこない
+      const result = view.toggle([b], true, pickInputs([b]));
+      expect(result).toMatchObject({ status: "needs-resplit", reason: "positions" });
+      // 0.2.0 はここで applied を返し、a が inner に残り続けていた
+      expect(targets.inner.log).toEqual([]);
+      expect(storedBlockAt(view.inner, parsePosKey(b)!)).toBeNull();
+
+      view.resplit(pickInputs([b]));
+      expect(storedBlockAt(view.inner, parsePosKey(a)!)).toBeNull();
+      expect(storedBlockAt(view.inner, parsePosKey(b)!)).not.toBeNull();
     });
 
-    it("verifyConsistency は blocksMap を壊すと検出する", () => {
+    it("【M5】inputs は「トグル適用後」の状態。適用前を渡すと needs-resplit になる", () => {
+      const full = buildFixtureStructure(SIZE, 0.4);
+      const [seed, key] = choosePicks(full, "ランダム", 2, 9);
+      const { view } = makeView(full, pickInputs([seed]));
+      // 適用「前」の inputs を渡す = README が 0.2.0 で教えていた規約
+      expect(view.toggle([key], true, pickInputs([seed]))).toMatchObject({
+        status: "needs-resplit",
+        reason: "positions",
+      });
+      // 適用「後」を渡せば通る
+      expect(view.toggle([key], true, pickInputs([seed, key])).status).toBe("applied");
+    });
+
+    it("【M4】validate 既定 on で、重複座標を含む構造体は構築時に報告される", () => {
+      const messages: string[] = [];
+      const dup = new Structure([SIZE, SIZE, SIZE]);
+      dup.addBlock([1, 1, 1], "minecraft:stone");
+      dup.addBlock([1, 1, 1], "minecraft:planks"); // 同一座標に 2 エントリ
+      dup.addBlock([2, 1, 1], "minecraft:stone");
+
+      new IncrementalSplitView(
+        dup,
+        { specs: [{ region: null, materials: ["minecraft:stone"] }] },
+        { inner: new TestTarget(), outer: new TestTarget() },
+        { chunkSize: CHUNK_SIZE, onValidationError: (m) => messages.push(m) },
+      );
+      expect(messages.length).toBeGreaterThan(0);
+      expect(messages[0]).toMatch(/重複/);
+    });
+
+    it("【M4】validate: false なら検証しない", () => {
+      const messages: string[] = [];
+      const dup = new Structure([SIZE, SIZE, SIZE]);
+      dup.addBlock([1, 1, 1], "minecraft:stone");
+      dup.addBlock([1, 1, 1], "minecraft:planks");
+      new IncrementalSplitView(
+        dup,
+        { specs: [{ region: null, materials: ["minecraft:stone"] }] },
+        { inner: new TestTarget(), outer: new TestTarget() },
+        { chunkSize: CHUNK_SIZE, validate: false, onValidationError: (m) => messages.push(m) },
+      );
+      expect(messages).toEqual([]);
+    });
+
+    it("verifyConsistency は palette index の範囲外を検出する", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
       const { view } = makeView(full);
       expect(view.verifyConsistency()).toBeNull();
+      const internal = structureInternals(view.inner);
+      internal.blocks[0].state = 999;
+      internal.blocksMap[
+        internal.blocks[0].pos[0] * SIZE * SIZE +
+          internal.blocks[0].pos[1] * SIZE +
+          internal.blocks[0].pos[2]
+      ]!.state = 999;
+      expect(view.verifyConsistency()).toContain("palette index");
+    });
+
+    it("verifyConsistency は inner/outer の座標重複を検出する", () => {
+      const full = buildFixtureStructure(SIZE, 0.4);
+      const { view } = makeView(full);
       const internal = structureInternals(view.outer);
-      // inner に既にある座標を outer にも生やす = 重複保持
       const innerBlock = structureInternals(view.inner).blocks[0];
       internal.blocks.push(innerBlock);
       internal.blocksMap[
@@ -332,31 +458,81 @@ describe("IncrementalSplitView", () => {
     });
   });
 
+  describe("chunkSize", () => {
+    it("target が chunkSize を公開していて view と食い違うなら構築時に throw する", () => {
+      const full = buildFixtureStructure(SIZE, 0.4);
+      const target = new TestTarget();
+      expect(
+        () =>
+          new IncrementalSplitView(full, makeInputs(), { inner: target, outer: new TestTarget() }, {
+            chunkSize: 16,
+          }),
+      ).toThrow(/chunkSize/);
+    });
+
+    it("一致していれば throw しない / chunkSize を公開しない target は検証をスキップ", () => {
+      const full = buildFixtureStructure(SIZE, 0.4);
+      expect(() => makeView(full)).not.toThrow();
+      const opaqueTarget: SplitRenderTarget = {
+        setStructure: () => {},
+        updateStructureBuffers: () => {},
+      };
+      expect(
+        () =>
+          new IncrementalSplitView(
+            full,
+            makeInputs(),
+            { inner: opaqueTarget, outer: opaqueTarget },
+            { chunkSize: 4 },
+          ),
+      ).not.toThrow();
+    });
+
+    it("既定の fullRebuildChunkThreshold はチャンクサイズ連動 (走査セル数ベース)", () => {
+      const full = buildFixtureStructure(SIZE, 0.4);
+      const make = (cs: number) =>
+        new IncrementalSplitView(
+          full,
+          makeInputs(),
+          { inner: new TestTarget(cs), outer: new TestTarget(cs) },
+          { chunkSize: cs },
+        ).fullRebuildChunkThreshold;
+      expect(make(16)).toBe(48);
+      expect(make(8)).toBe(384);
+      expect(make(32)).toBe(6);
+    });
+  });
+
   describe("slice / crop との組み合わせ", () => {
-    it("スライス適用後の実体を保持し、範囲外の座標のトグルは no-op になる", () => {
+    it("スライス適用後の実体を保持し、範囲外の座標のトグルは skipped になる", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
       const slice: [number, number] = [0, 7];
-      const inputs = makeInputs({ slice });
-      const { view, targets } = makeView(full, inputs);
+      const seed = choosePicks(full, "ランダム", 40, 12)
+        .filter((k) => parsePosKey(k)![1] <= 7)
+        .slice(0, 1);
+      expect(seed.length).toBe(1);
+      const { view, targets } = makeView(full, pickInputs(seed, { slice }));
 
-      // スライス範囲内はすべて y <= 7
       expect(view.inner.getBlocks().every((b) => b.pos[1] <= 7)).toBe(true);
       expect(view.outer.getBlocks().every((b) => b.pos[1] <= 7)).toBe(true);
 
-      // 範囲外 (y >= 8) のピックは差分に現れない
+      // 範囲外 (y >= 8) のピックは差分に現れない (skipped で申告される)
       const outside = choosePicks(full, "ランダム", 40, 4).filter((k) => parsePosKey(k)![1] >= 8);
       expect(outside.length).toBeGreaterThan(0);
-      expect(view.toggle(outside, true, inputs)).toBe(0);
+      expect(
+        view.toggle(outside, true, pickInputs([...seed, ...outside], { slice })),
+      ).toMatchObject({ status: "noop", skipped: outside.length });
 
       // 範囲内のピックは通常どおり差分適用され、full 再構築と一致する
-      const inside = choosePicks(full, "ランダム", 40, 4).filter((k) => parsePosKey(k)![1] <= 7);
+      const inside = choosePicks(full, "ランダム", 40, 4)
+        .filter((k) => parsePosKey(k)![1] <= 7)
+        .filter((k) => !seed.includes(k));
       expect(inside.length).toBeGreaterThan(0);
-      expect(view.toggle(inside, true, inputs)).toBeGreaterThan(0);
+      expect(
+        view.toggle(inside, true, pickInputs([...seed, ...outside, ...inside], { slice })).status,
+      ).toBe("applied");
 
-      const reference = splitStructure(full, [
-        REGION_SPEC,
-        { region: null, materials: null, positions: inside },
-      ]);
+      const reference = splitStructure(full, specsWith([...seed, ...inside]));
       const sliced = (s: Structure) =>
         new Structure(
           [SIZE, SIZE, SIZE],
@@ -371,41 +547,61 @@ describe("IncrementalSplitView", () => {
       ).toBeNull();
     });
 
-    it("slice の変更はシグネチャ不一致として resplit に落ちる", () => {
+    it("slice の変更はシグネチャ不一致として needs-resplit になる", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
-      const inputs = makeInputs({ slice: [0, 7] });
-      const { view } = makeView(full, inputs);
-      expect(view.toggle(["12,0,0"], true, makeInputs({ slice: [0, 15] }))).toBe(-1);
-      expect(view.inner.getBlocks().concat(view.outer.getBlocks()).some((b) => b.pos[1] > 7)).toBe(
-        true,
-      );
+      const [seed, key] = choosePicks(full, "ランダム", 2, 6);
+      const { view } = makeView(full, pickInputs([seed], { slice: [0, 7] }));
+      expect(
+        view.toggle([key], true, pickInputs([seed, key], { slice: [0, 15] })),
+      ).toMatchObject({ status: "needs-resplit", reason: "structure" });
     });
 
     it("crop モードでは faded 側が outer になり、範囲外はどちらにも入らない", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
-      const crop = {
-        region: { start: [0, 0, 0] as [number, number, number], end: [11, 11, 11] as [number, number, number] },
+      const cropOf = (positions: string[]) => ({
+        region: {
+          start: [0, 0, 0] as [number, number, number],
+          end: [11, 11, 11] as [number, number, number],
+        },
         materials: null,
-        positions: ["1,1,1"],
-      };
-      const { view, targets } = makeView(full, makeInputs({ crop }));
+        positions,
+      });
+      const { view, targets } = makeView(full, { specs: [], crop: cropOf(["1,1,1"]) });
       const all = view.inner.getBlocks().concat(view.outer.getBlocks());
       expect(all.every((b) => b.pos.every((v) => v <= 11))).toBe(true);
       expect(all.length).toBeGreaterThan(0);
 
-      // crop 範囲外のトグルは no-op、範囲内は差分適用される
-      expect(view.toggle(["20,20,20"], true)).toBe(0);
+      // crop 範囲外のトグルは skipped
+      expect(
+        view.toggle(["20,20,20"], true, { specs: [], crop: cropOf(["1,1,1", "20,20,20"]) }),
+      ).toMatchObject({ status: "noop", skipped: 1 });
+
       const inside = view.outer.getBlocks()[0].pos.join(",");
-      expect(view.toggle([inside], true)).toBeGreaterThan(0);
+      expect(
+        view.toggle([inside], true, {
+          specs: [],
+          crop: cropOf(["1,1,1", "20,20,20", inside]),
+        }).status,
+      ).toBe("applied");
       expect(view.verifyConsistency()).toBeNull();
       expect(targets.inner.quadSets().size).toBeGreaterThan(0);
+    });
+
+    it("【minor】resplit は SplitInputs を受けるので crop/slice が落ちない", () => {
+      const full = buildFixtureStructure(SIZE, 0.4);
+      const inputs = makeInputs({ slice: [0, 7] });
+      const { view } = makeView(full, inputs);
+      // 0.2.0 の位置引数版は resplit(specs) だけ呼ぶと slice が消えていた
+      view.resplit(inputs);
+      expect(view.inner.getBlocks().every((b) => b.pos[1] <= 7)).toBe(true);
+      expect(view.outer.getBlocks().every((b) => b.pos[1] <= 7)).toBe(true);
     });
 
     it("resplit は specs を差し替えて両レンダラを作り直す", () => {
       const full = buildFixtureStructure(SIZE, 0.4);
       const { view, targets } = makeView(full);
       const newSpec: SelectionSpec = { region: null, materials: ["minecraft:stone"] };
-      view.resplit([newSpec]);
+      view.resplit({ specs: [newSpec] });
       const reference = splitStructure(full, [newSpec]);
       expect(
         diffChunkQuadSets(targets.inner.quadSets(), referenceQuadSets(reference.inner)),
@@ -414,7 +610,7 @@ describe("IncrementalSplitView", () => {
         diffChunkQuadSets(targets.outer.quadSets(), referenceQuadSets(reference.outer)),
       ).toBeNull();
       // resplit 後は新しいシグネチャで差分が通る
-      expect(view.toggle([], true, { specs: [newSpec] })).toBe(0);
+      expect(view.toggle([], true, { specs: [newSpec] }).status).toBe("noop");
     });
   });
 

@@ -152,29 +152,56 @@ export function rng(seed: number): () => number {
 }
 
 /**
+ * ブロックを blocks 配列へ積む順序。
+ * - `ascending`  — x→y→z 昇順 (= 平坦化 index 昇順。MC 純正セーブ相当)
+ * - `zyx`        — z→y→x 順 (litematica 由来の変換物のように昇順でないもの)
+ * - `reversed`   — 完全な逆順
+ */
+export type FixtureOrder = "ascending" | "zyx" | "reversed";
+
+/**
  * 一辺 `size` の立方体に密度 `density` でブロックを敷き詰めた構造体。
  * air 判定と材質選択で乱数を分けている (同じ値を使い回すと値域が偏り、
  * 最後の材質 = fin が一度も置かれなくなる)。
+ *
+ * `order` で blocks 配列の並びを変えられる。`ascending` 以外は
+ * 「正規化されていない構造体」の再現に使う。
  */
-export function buildFixtureStructure(size = 16, density = 0.5, seed = 42): Structure {
+export function buildFixtureStructure(
+  size = 16,
+  density = 0.5,
+  seed = 42,
+  order: FixtureOrder = "ascending",
+  names: readonly string[] = FIXTURE_NAMES,
+): Structure {
   const rand = rng(seed);
-  const s = new Structure([size, size, size]);
+  const picked: [number, number, number, string][] = [];
   for (let x = 0; x < size; x++) {
     for (let y = 0; y < size; y++) {
       for (let z = 0; z < size; z++) {
         if (rand() >= density) continue;
-        s.addBlock([x, y, z], FIXTURE_NAMES[Math.floor(rand() * FIXTURE_NAMES.length)]);
+        picked.push([x, y, z, names[Math.floor(rand() * names.length)]]);
       }
     }
   }
+  if (order === "reversed") picked.reverse();
+  else if (order === "zyx") {
+    picked.sort((a, b) => a[2] - b[2] || a[1] - b[1] || a[0] - b[0]);
+  }
+  const s = new Structure([size, size, size]);
+  for (const [x, y, z, name] of picked) s.addBlock([x, y, z], name);
   return s;
 }
 
-// ── GPU バッファからの quad 集合抽出 ───────────────────────────────────
+// ── GPU バッファからの quad 抽出 ───────────────────────────────────────
 //
-// 部分更新はチャンク内の quad 並び順が素の実装 (blocks 配列順) と変わるため、
-// バイト列比較ではなく「quad の集合」として比較する。
-// pos / normal / texture を連結したものを quad のキーとし、ソートして正規化する。
+// pos / normal / texture を連結したものを quad のキーにする。
+//
+// **並び順は描画結果に効く** (半透明の over 合成 / FadeRenderer の depthMask(false))。
+// そのため比較モードを 2 つ持つ:
+//   ordered: false — キーをソートして集合として比較 (「同じ quad が揃っているか」)
+//   ordered: true  — バッファ内の並びのまま比較 (「描画順まで一致しているか」)
+// 順序一致は blocks が平坦化 index 昇順に正規化されている前提で成り立つ。
 
 interface MeshBuffers {
   posBuffer?: WebGLBuffer;
@@ -182,7 +209,11 @@ interface MeshBuffers {
   textureBuffer?: WebGLBuffer;
 }
 
-function quadKeys(mesh: MeshBuffers, buffers: Map<WebGLBuffer, RecordedBuffer>): string[] {
+function quadKeys(
+  mesh: MeshBuffers,
+  buffers: Map<WebGLBuffer, RecordedBuffer>,
+  ordered: boolean,
+): string[] {
   const pos = mesh.posBuffer ? buffers.get(mesh.posBuffer)?.data : undefined;
   if (!pos) return [];
   const normal = mesh.normalBuffer ? buffers.get(mesh.normalBuffer)?.data : undefined;
@@ -195,7 +226,7 @@ function quadKeys(mesh: MeshBuffers, buffers: Map<WebGLBuffer, RecordedBuffer>):
     const t = texture ? Array.from(texture.slice(i * 8, i * 8 + 8)) : [];
     keys.push(`${p.join(",")}|${n.join(",")}|${t.join(",")}`);
   }
-  keys.sort();
+  if (!ordered) keys.sort();
   return keys;
 }
 
@@ -205,12 +236,15 @@ interface ChunkMeshes {
 }
 
 /**
- * ChunkBuilder が保持する全チャンクの quad 集合を「チャンク座標 → 正規化キー」で返す。
+ * ChunkBuilder が保持する全チャンクの quad を「チャンク座標 → キー列」で返す。
  * quad をチャンクごとに分けて比較するので、「別チャンクに紛れ込んだ」も検出できる。
+ *
+ * @param ordered true なら並び順も含めて比較する (描画順の一致検証用)
  */
 export function chunkQuadSets(
   cb: ChunkBuilder,
   buffers: Map<WebGLBuffer, RecordedBuffer>,
+  ordered = false,
 ): Map<string, string> {
   const chunks = (cb as unknown as { chunks: (ChunkMeshes | undefined)[][][] }).chunks;
   const out = new Map<string, string>();
@@ -222,7 +256,7 @@ export function chunkQuadSets(
           ["opaque", chunk.mesh],
           ["transparent", chunk.transparentMesh],
         ] as const) {
-          const keys = quadKeys(mesh as unknown as MeshBuffers, buffers);
+          const keys = quadKeys(mesh as unknown as MeshBuffers, buffers, ordered);
           if (keys.length === 0) continue;
           out.set(`${xi},${yi},${zi},${tag}`, `${keys.length}\n${keys.join("\n")}`);
         }
