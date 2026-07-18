@@ -26,12 +26,18 @@ export function structureInternals(structure: Structure): StructureInternal {
   return structure as unknown as StructureInternal;
 }
 
-// ── in-place 差分ヘルパ ────────────────────────────────────────────────
+// ── ブロック順序の正規化 ──────────────────────────────────────────────
 //
-// ピック 1 個で Structure を作り直すと O(N) かかるので、inner/outer 間で
-// StoredBlock を「移す」だけの操作を提供する。palette は splitStructure /
-// splitStructureCropped が slice() で切り離した同一内容のコピーなので、
-// palette index はそのまま持ち回れる (再解決不要)。
+// **なぜ順序が意味を持つか**: ChunkBuilder はチャンク内の quad を「ブロックを
+// 処理した順」に merge し、その並びがそのまま頂点バッファの並び = 描画順になる。
+// deepslate の Renderer は BLEND を有効にしたまま描くため、over 合成が非可換な
+// 半透明ブロックでは**描画順が最終ピクセルを変える**。FadeStructureRenderer は
+// さらに depthMask(false) で描くので、fade レイヤーは全ブロックが順序依存になる。
+//
+// 全再構築 (素の deepslate) は `blocks` 配列順、部分更新 (patch (e)) は座標昇順に
+// 並べるため、両者が食い違うと「ピックのたびにチャンクの色味が変わる」ちらつきになる。
+// そこで **blocks を平坦化 index (= 座標 x→y→z 昇順) に正規化**し、両経路の順序を
+// 一致させる。patch (e) の走査順は x→y→z なので、正規化済みなら完全に同じ並びになる。
 
 /** 平坦化 index。Structure.getBlock / constructor と同一の式 */
 function flatIndex(pos: readonly number[], size: readonly number[]): number {
@@ -50,29 +56,117 @@ function isInside(pos: readonly number[], size: readonly number[]): boolean {
 }
 
 /**
- * 平坦化 index → `blocks` 配列内の位置。
- *
- * これが無いと remove ごとに `blocks` の線形走査が入り、ドラッグ確定
- * (数千ブロック) が O(N·M) になる。オブジェクト同一性ではなく座標で引くのは
- * deepslate の `Structure.addBlock` が `blocks` と `blocksMap` に
- * **別々のオブジェクトリテラル**を入れるため (constructor 経路は同一オブジェクト)。
- * キャッシュが配列と食い違っていた場合は線形走査にフォールバックするので、
- * 外部から blocks を直接いじられても壊れない。
+ * blocks が平坦化 index の昇順に並んでいるか。
+ * 結果は Structure ごとにキャッシュし、remove/add で維持する。
  */
-const blockPositionCache = new WeakMap<Structure, Map<number, number>>();
+const sortedFlag = new WeakMap<Structure, boolean>();
 
-function positionCacheFor(
-  structure: Structure,
-  blocks: StoredBlock[],
-  size: readonly number[],
-): Map<number, number> {
-  let cache = blockPositionCache.get(structure);
-  if (!cache) {
-    cache = new Map();
-    for (let i = 0; i < blocks.length; i++) cache.set(flatIndex(blocks[i].pos, size), i);
-    blockPositionCache.set(structure, cache);
+function computeSorted(blocks: StoredBlock[], size: readonly number[]): boolean {
+  for (let i = 1; i < blocks.length; i++) {
+    if (flatIndex(blocks[i - 1].pos, size) > flatIndex(blocks[i].pos, size)) return false;
   }
-  return cache;
+  return true;
+}
+
+function isSorted(structure: Structure, blocks: StoredBlock[], size: readonly number[]): boolean {
+  let flag = sortedFlag.get(structure);
+  if (flag === undefined) {
+    flag = computeSorted(blocks, size);
+    sortedFlag.set(structure, flag);
+  }
+  return flag;
+}
+
+/**
+ * blocks を平坦化 index の昇順に並べ替える (既に昇順なら何もしない)。
+ *
+ * `splitStructure` / `splitStructureCropped` / `filterStructureByY` の出力は
+ * 自動的に正規化されるので、通常はこれを直接呼ぶ必要はない。
+ * **分割を経由せず生の Structure をレンダラに渡したうえで
+ * `fastPartialChunkUpdate` の部分更新を使う場合**は、全再構築と部分更新の
+ * 描画順を一致させるためにこれを一度通しておくこと。
+ *
+ * @returns 実際に並べ替えたら true (既に昇順なら false)
+ */
+export function sortStructureBlocks(structure: Structure): boolean {
+  const size = structure.getSize();
+  const { blocks } = structureInternals(structure);
+  if (computeSorted(blocks, size)) {
+    sortedFlag.set(structure, true);
+    return false;
+  }
+  blocks.sort((a, b) => flatIndex(a.pos, size) - flatIndex(b.pos, size));
+  sortedFlag.set(structure, true);
+  return true;
+}
+
+/** blocks が平坦化 index 昇順に正規化済みか (テスト・診断用) */
+export function structureBlocksSorted(structure: Structure): boolean {
+  return computeSorted(structureInternals(structure).blocks, structure.getSize());
+}
+
+/** 分割結果を正規化して Structure を作る (入力が昇順なら sort は走らない) */
+function createNormalized(
+  size: [number, number, number],
+  palette: BlockState[],
+  blocks: StoredBlock[],
+): Structure {
+  if (!computeSorted(blocks, size)) {
+    blocks.sort((a, b) => flatIndex(a.pos, size) - flatIndex(b.pos, size));
+  }
+  const structure = new Structure(size, palette, blocks);
+  sortedFlag.set(structure, true);
+  return structure;
+}
+
+// ── in-place 差分ヘルパ ────────────────────────────────────────────────
+//
+// ピック 1 個で Structure を作り直すと O(N) かかるので、inner/outer 間で
+// StoredBlock を「移す」だけの操作を提供する。palette は splitStructure /
+// splitStructureCropped が slice() で切り離した同一内容のコピーなので、
+// palette index はそのまま持ち回れる (再解決不要)。
+//
+// **順序保存**: 昇順に正規化された blocks に対しては二分探索 + splice で
+// 昇順を保ったまま出し入れする (131k ブロックで 1 操作あたり実測 0.01ms 未満)。
+// 以前の swap-remove は O(1) だったが、削除位置に配列末尾の要素を持ってくるため
+// **無関係な遠方チャンクの描画順まで変えてしまう**ので使わない。
+
+/** 昇順配列で index の位置を返す (無ければ -1)。非昇順なら線形走査にフォールバック */
+function findBlockIndex(
+  blocks: StoredBlock[],
+  target: number,
+  size: readonly number[],
+  sorted: boolean,
+): number {
+  if (!sorted) {
+    return blocks.findIndex((b) => flatIndex(b.pos, size) === target);
+  }
+  let lo = 0;
+  let hi = blocks.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const key = flatIndex(blocks[mid].pos, size);
+    if (key === target) return mid;
+    if (key < target) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** 昇順配列で target を挿入すべき位置 (最初に target より大きい要素の index) */
+function findInsertIndex(
+  blocks: StoredBlock[],
+  target: number,
+  size: readonly number[],
+): number {
+  let lo = 0;
+  let hi = blocks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (flatIndex(blocks[mid].pos, size) < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /** pos にある StoredBlock を返す (PlacedBlock を作らないので O(1) かつ非アロケート)。無ければ null */
@@ -87,12 +181,11 @@ export function storedBlockAt(
 
 /**
  * pos のブロックを構造体から取り除いて返す (無ければ null)。
- * `blocks` は swap-remove するため配列順が変わる (チャンク内 quad の並びが変わるだけで
- * 描画結果は不変。deepslate はチャンク内をソートしていない)。
+ * 残りのブロックの相対順序は保たれる (= 描画順を変えない)。
  *
  * 前提: 同一座標に複数の StoredBlock が登録されていないこと (blocksMap は
  * 最後の 1 個しか指さないため、重複があると getBlock と getBlocks が乖離する)。
- * サーバ正規化済みの Java Structure NBT では発生しない。
+ * `IncrementalSplitView` は構築時にこれを検証して警告する。
  */
 export function removeStoredBlock(
   structure: Structure,
@@ -107,19 +200,12 @@ export function removeStoredBlock(
   delete internal.blocksMap[index];
 
   const blocks = internal.blocks;
-  const cache = positionCacheFor(structure, blocks, size);
-  let at = cache.get(index);
-  if (at === undefined || !blocks[at] || flatIndex(blocks[at].pos, size) !== index) {
-    at = blocks.findIndex((b) => flatIndex(b.pos, size) === index);
-  }
-  cache.delete(index);
+  // オブジェクト同一性ではなく座標で引く: Structure.addBlock は blocks と blocksMap に
+  // 別オブジェクトを入れるため (constructor 経路は同一オブジェクト)。
+  const at = findBlockIndex(blocks, index, size, isSorted(structure, blocks, size));
   if (at < 0) return stored;
-
   const removed = blocks[at];
-  const last = blocks[blocks.length - 1];
-  blocks[at] = last;
-  blocks.pop();
-  if (last !== removed) cache.set(flatIndex(last.pos, size), at);
+  blocks.splice(at, 1);
   return removed;
 }
 
@@ -127,6 +213,7 @@ export function removeStoredBlock(
  * StoredBlock を palette index そのままで追加する。
  * removeStoredBlock で取り出したものを、palette を共有する別の構造体
  * (splitStructure の inner/outer) へ移すために使う。
+ * 昇順に正規化された構造体では昇順を保つ位置に挿入する。
  */
 export function addStoredBlock(structure: Structure, block: StoredBlock): void {
   const size = structure.getSize();
@@ -135,9 +222,13 @@ export function addStoredBlock(structure: Structure, block: StoredBlock): void {
   }
   const internal = structureInternals(structure);
   const index = flatIndex(block.pos, size);
-  internal.blocks.push(block);
+  const blocks = internal.blocks;
+  if (isSorted(structure, blocks, size)) {
+    blocks.splice(findInsertIndex(blocks, index, size), 0, block);
+  } else {
+    blocks.push(block);
+  }
   internal.blocksMap[index] = block;
-  blockPositionCache.get(structure)?.set(index, internal.blocks.length - 1);
 }
 
 /** 自身 + 6 近傍。needsCull が隣接ブロックを見るため近傍チャンクも dirty になる */
@@ -158,6 +249,8 @@ const NEIGHBOR_OFFSETS: readonly (readonly [number, number, number])[] = [
  * opaque 判定を見るので、チャンク境界のブロックを足し引きすると
  * **隣のチャンク側の面**が復活/消滅する。6 近傍を含めないと
  * 「消したはずのブロックの面が残る」視覚バグになる (incrementalSplit.test.ts の回帰テスト参照)。
+ * deepslate 0.25.1 では隣接依存は needsCull の 6 方向のみ (AO 等が無い) なので
+ * 斜め隣接は不要。
  *
  * 構造体の範囲外に出た近傍座標は捨てる。範囲外チャンクを渡すと
  * ChunkBuilder.getChunk が空チャンクを遅延生成して chunks 配列が肥大するため。
@@ -184,6 +277,7 @@ export function dirtyChunksFor(
   }
   return [...out.values()];
 }
+
 
 /** 選択範囲（両端を含む直方体、ブロック座標） */
 export interface Region {
@@ -271,10 +365,11 @@ export function splitStructureCropped(
       : !materialMatch || materialMatch[block.state];
     (isInner ? innerBlocks : fadedBlocks).push(block);
   }
-  // palette は slice で切り離す (共有すると派生側への addBlock が元 Structure に波及する)
+  // palette は slice で切り離す (共有すると派生側への addBlock が元 Structure に波及する)。
+  // blocks は平坦化 index 昇順に正規化する (部分更新と描画順を一致させるため)。
   return {
-    inner: new Structure(size, palette.slice(), innerBlocks),
-    faded: new Structure(size, palette.slice(), fadedBlocks),
+    inner: createNormalized(size, palette.slice(), innerBlocks),
+    faded: createNormalized(size, palette.slice(), fadedBlocks),
   };
 }
 
@@ -316,8 +411,8 @@ export function splitStructure(
     (isInner ? innerBlocks : outerBlocks).push(block);
   }
   return {
-    inner: new Structure(size, palette.slice(), innerBlocks),
-    outer: new Structure(size, palette.slice(), outerBlocks),
+    inner: createNormalized(size, palette.slice(), innerBlocks),
+    outer: createNormalized(size, palette.slice(), outerBlocks),
   };
 }
 
@@ -327,5 +422,5 @@ export function filterStructureByY(structure: Structure, minY: number, maxY: num
   if (minY <= 0 && maxY >= size[1] - 1) return structure; // 全体ならそのまま
   const { palette, blocks } = structureInternals(structure);
   const filtered = blocks.filter((b) => b.pos[1] >= minY && b.pos[1] <= maxY);
-  return new Structure(size, palette.slice(), filtered);
+  return createNormalized(size, palette.slice(), filtered);
 }

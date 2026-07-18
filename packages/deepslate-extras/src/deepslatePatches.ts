@@ -34,10 +34,18 @@
 //   needsCull / finishChunkMesh / getChunk) に構造的型でアクセスする。deepslate の
 //   マイナー更新で内部が変わると壊れるため、partialChunkUpdate.test.ts が
 //   「素の実装と quad 集合が一致する」ことを検証している。
-// - (e) はチャンク内の quad 並び順が素の実装 (blocks 配列順) と変わる
-//   (座標昇順になる)。deepslate はチャンク内をソートしないため描画結果は同一。
+// - (e) はチャンク内の quad を**座標 (x→y→z) 昇順**で積む。素の実装は blocks 配列順。
+//   **この並びは描画結果に影響する**: deepslate の Renderer は BLEND を有効にしたまま
+//   描き、FadeStructureRenderer は depthMask(false) で描くため、over 合成が非可換な
+//   半透明ブロック (および fade レイヤー全体) では順序がそのまま最終ピクセルを変える。
+//   そのため splitStructure 系は blocks を平坦化 index 昇順に正規化しており、
+//   **正規化済みの構造体に対しては (e) と素の実装の並びが完全に一致する**。
+//   分割を経由しない構造体では sortStructureBlocks() を一度通すこと。
+// - (e) は `Structure` (deepslate 実体) にのみ適用される。独自 StructureProvider は
+//   getBlock が [0, getSize()) の外を返しうる (= 座標総当りでは拾えない) ため、
+//   素の実装に委譲する。
 
-import { Direction } from "deepslate/core";
+import { Direction, Structure } from "deepslate/core";
 import type { BlockPos, StructureProvider } from "deepslate/core";
 import type { vec3 } from "gl-matrix";
 import { ChunkBuilder, Mesh, Renderer, SpecialRenderers } from "deepslate/render";
@@ -90,22 +98,44 @@ export interface DeepslatePatchOptions {
   /**
    * true にすると、`ChunkBuilder.updateStructureBuffers(chunkPositions)` を
    * 構造体のブロック数に依存しないチャンク座標総当り版に差し替える。
-   * 出力 (チャンクごとの quad 集合) は素の実装と同一だが、チャンク内の
-   * quad 並び順が座標昇順になる (描画結果は不変)。
+   * 出力 (チャンクごとの quad 集合) は素の実装と同一で、並び順は座標 (x→y→z) 昇順になる。
    *
-   * `chunkPositions` 未指定の全再構築は常に素の実装をそのまま呼ぶため、
-   * 既定経路の挙動・性能は完全に無改変。
+   * **並び順は半透明ブロックと fade 描画の見た目に影響する** (over 合成は非可換)。
+   * `splitStructure` 系の出力は同じ昇順に正規化されているので両経路の並びは一致する。
+   * 分割を経由しない構造体を使う場合は `sortStructureBlocks()` を一度通すこと。
+   *
+   * `chunkPositions` 未指定の全再構築、および `Structure` 以外の
+   * `StructureProvider` は常に素の実装をそのまま呼ぶため、既定経路は完全に無改変。
    */
   fastPartialChunkUpdate?: boolean;
 }
 
 // ── モジュール状態 ────────────────────────────────────────────
-let applied = false;
-let releaseQuadsAfterUpload = false;
-let fastPartialChunkUpdate = false;
 
-// 二重バンドル時の多重適用ガード用マーカー
+// ESM/CJS 併存や二重バンドルでこのモジュールのコピーが 2 つ存在しうる。
+// prototype に載る patch 関数はコピー A のものだけなので、フラグをモジュール
+// スコープ変数に置くとコピー B からの設定変更が黙って無視される
+// (「0.2.0 に上げたのに速くならない」形で顕在化する)。
+// そのため設定は prototype 上の共有オブジェクトに置き、patch 関数はそこから読む。
 const PATCH_MARKER = "__redtactDeepslatePatched";
+const CONFIG_KEY = "__redtactDeepslateConfig";
+
+interface PatchConfig {
+  releaseQuadsAfterUpload: boolean;
+  fastPartialChunkUpdate: boolean;
+}
+
+function sharedConfig(): PatchConfig {
+  const host = Mesh.prototype as unknown as Record<string, PatchConfig | undefined>;
+  let config = host[CONFIG_KEY];
+  if (!config) {
+    config = { releaseQuadsAfterUpload: false, fastPartialChunkUpdate: false };
+    host[CONFIG_KEY] = config;
+  }
+  return config;
+}
+
+let applied = false;
 
 // ── (a) rebuild: typed-array 直書き ──────────────────────────
 
@@ -256,7 +286,7 @@ function patchedRebuild(
   // 部分 rebuild ({pos, color} のみ等) で解放すると、後から別属性の rebuild が
   // 走ったときに再構築できなくなるため対象外。
   if (
-    releaseQuadsAfterUpload &&
+    sharedConfig().releaseQuadsAfterUpload &&
     !released &&
     this.quads.length > 0 &&
     options.pos &&
@@ -447,12 +477,17 @@ function patchedUpdateStructureBuffers(
   this: ChunkBuilderInternal,
   chunkPositions?: vec3[],
 ): void {
-  if (!fastPartialChunkUpdate || !chunkPositions) {
+  const structure = this.structure;
+  // Structure 以外の StructureProvider は getBlock が [0, getSize()) の外を返しうるので
+  // 座標総当りでは取りこぼす。型で安全性が担保できる Structure だけを高速経路に通す。
+  if (
+    !sharedConfig().fastPartialChunkUpdate ||
+    !chunkPositions ||
+    !(structure instanceof Structure)
+  ) {
     originalUpdateStructureBuffers?.call(this, chunkPositions);
     return;
   }
-  const structure = this.structure;
-  if (!structure) return;
   const chunkSize = this.chunkSize;
   const size = structure.getSize();
   const resources = this.resources;
@@ -526,11 +561,14 @@ function patchedUpdateStructureBuffers(
  * GL コンテキスト生成・レンダラ生成より前に呼ぶこと。
  */
 export function applyDeepslatePatches(options?: DeepslatePatchOptions): void {
+  // 設定は prototype 上の共有オブジェクトに書くので、モジュールのコピーが
+  // 2 つあっても後から呼んだ側の指定がちゃんと効く。
+  const config = sharedConfig();
   if (options?.releaseQuadsAfterUpload !== undefined) {
-    releaseQuadsAfterUpload = options.releaseQuadsAfterUpload;
+    config.releaseQuadsAfterUpload = options.releaseQuadsAfterUpload;
   }
   if (options?.fastPartialChunkUpdate !== undefined) {
-    fastPartialChunkUpdate = options.fastPartialChunkUpdate;
+    config.fastPartialChunkUpdate = options.fastPartialChunkUpdate;
   }
   // Mesh の this 型 (clear(): this 等) と衝突しないよう構造的 Record 経由で差し替える
   const meshProto = Mesh.prototype as unknown as Record<string, unknown>;

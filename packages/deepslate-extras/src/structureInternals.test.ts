@@ -15,7 +15,9 @@ import {
   addStoredBlock,
   dirtyChunksFor,
   removeStoredBlock,
+  sortStructureBlocks,
   storedBlockAt,
+  structureBlocksSorted,
   structureInternals,
   type StoredBlock,
 } from "./splitStructure";
@@ -132,7 +134,7 @@ describe("storedBlockAt", () => {
 });
 
 describe("removeStoredBlock / addStoredBlock", () => {
-  it("swap-remove 後も getBlock と getBlocks が一致する", () => {
+  it("remove 後も getBlock と getBlocks が一致する", () => {
     const s = buildStructure();
     const removed = removeStoredBlock(s, [0, 0, 0]);
     expect(removed).not.toBeNull();
@@ -147,7 +149,7 @@ describe("removeStoredBlock / addStoredBlock", () => {
     }
   });
 
-  it("複数個を連続で remove しても blocks / blocksMap が整合する (swap-remove の連鎖)", () => {
+  it("複数個を連続で remove しても blocks / blocksMap が整合する", () => {
     const s = buildStructure();
     for (const pos of [
       [0, 0, 0],
@@ -220,6 +222,46 @@ describe("removeStoredBlock / addStoredBlock", () => {
   it("addStoredBlock は範囲外座標で throw する", () => {
     const s = buildStructure();
     expect(() => addStoredBlock(s, { pos: [99, 0, 0], state: 0 })).toThrow();
+  });
+
+  it("blocks が昇順でない構造体でも正しく remove / add できる (線形フォールバック)", () => {
+    // 二分探索は昇順前提なので、非昇順の構造体では線形走査に落ちる必要がある
+    const s = new Structure(SIZE);
+    s.addBlock([3, 4, 5], "minecraft:stone");
+    s.addBlock([0, 0, 0], "minecraft:stone");
+    s.addBlock([1, 2, 3], "minecraft:planks");
+    expect(structureBlocksSorted(s)).toBe(false);
+
+    const removed = removeStoredBlock(s, [0, 0, 0]);
+    expect(removed).not.toBeNull();
+    expect(s.getBlock([0, 0, 0])).toBeNull();
+    expect(s.getBlocks().map((b) => b.pos.join(","))).toEqual(["3,4,5", "1,2,3"]);
+
+    addStoredBlock(s, removed!);
+    expect(s.getBlock([0, 0, 0])).not.toBeNull();
+    expect(s.getBlocks().length).toBe(3);
+  });
+
+  it("sortStructureBlocks 後は昇順が維持され、remove/add でも崩れない", () => {
+    const s = new Structure(SIZE);
+    s.addBlock([3, 4, 5], "minecraft:stone");
+    s.addBlock([0, 0, 0], "minecraft:stone");
+    s.addBlock([1, 2, 3], "minecraft:planks");
+    expect(sortStructureBlocks(s)).toBe(true);
+    expect(structureInternals(s).blocks.map((b) => b.pos.join(","))).toEqual([
+      "0,0,0",
+      "1,2,3",
+      "3,4,5",
+    ]);
+    const removed = removeStoredBlock(s, [1, 2, 3])!;
+    expect(structureBlocksSorted(s)).toBe(true);
+    addStoredBlock(s, removed);
+    expect(structureBlocksSorted(s)).toBe(true);
+    expect(structureInternals(s).blocks.map((b) => b.pos.join(","))).toEqual([
+      "0,0,0",
+      "1,2,3",
+      "3,4,5",
+    ]);
   });
 
   it("addBlock で作った構造体 (blocks/blocksMap が別オブジェクト) でも正しく remove できる", () => {

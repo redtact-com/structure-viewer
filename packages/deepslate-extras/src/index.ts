@@ -15,6 +15,8 @@ export {
   removeStoredBlock,
   storedBlockAt,
   dirtyChunksFor,
+  sortStructureBlocks,
+  structureBlocksSorted,
   type CropSpec,
   type Region,
   type SelectionSpec,
@@ -25,10 +27,12 @@ export {
   IncrementalSplitView,
   parsePosKey,
   type IncrementalSplitViewOptions,
+  type NeedsResplitReason,
   type SliceRange,
   type SplitInputs,
   type SplitRenderTarget,
   type SplitTargets,
+  type ToggleResult,
 } from "./incrementalSplit";
 export {
   cameraRayFromMouse,

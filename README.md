@@ -80,68 +80,79 @@ const view = new IncrementalSplitView(
   { chunkSize: 16 }, // must match the renderers' ChunkBuilder chunk size
 );
 
-// One picked block: returns the number of chunks re-meshed.
-const inputs = { specs, crop: null, slice: null };
-if (view.toggle(["3,4,5"], true, inputs) < 0) {
-  // -1 = too many dirty chunks, or the caller's specs/crop/slice changed.
-  // Nothing was applied; fall back to a full rebuild.
-  view.resplit(specs, crop, slice);
+// One picked block. `next` describes the inputs AFTER this toggle is applied.
+const next = { specs: specsWithPositions(nextPositions), crop, slice };
+const result = view.toggle(["3,4,5"], true, next);
+if (result.status === "needs-resplit") {
+  // The view was left untouched — do the full rebuild exactly once, here.
+  view.resplit(next);
 }
+loop.invalidate(); // toggle only updates GPU buffers; it does not request a redraw
 ```
 
-Passing `inputs` to `toggle` is strongly recommended: the view compares it with
-the signature it last split on, and forces a `resplit` if they disagree, so a
-bug in the caller's change detection cannot leave the screen out of sync with
-the application state.
+`toggle` returns a discriminated result rather than a number:
+
+| `status` | meaning | what the caller must do |
+| --- | --- | --- |
+| `applied` | `chunks` chunks were re-meshed, `moved` blocks changed side | redraw |
+| `noop` | nothing moved (`skipped` keys were air / already moved / outside the slice or crop) | redraw not needed |
+| `needs-resplit` | **the view is unchanged**; `reason` is `threshold`, `structure`, or `positions` | call `view.resplit(inputs)` once |
+
+Rules that the view enforces for you:
+
+- **`inputs` describes the state *after* the toggle.** The view compares it with
+  its own state — both the structural signature (specs/crop/slice minus
+  positions) and the resulting set of picked positions. If the caller's change
+  detection is wrong (for example treating a *replacement* selection as an
+  *addition*), the view refuses the diff and asks for a resplit instead of
+  silently leaving stale blocks selected.
+- **`needs-resplit` never mutates the view**, so the full rebuild happens exactly
+  once, in the caller. Going from 1 picked block to 0 (or 0 to 1) always lands
+  here, because `splitStructure` ignores `region`/`materials` while `positions`
+  is non-empty — the meaning of the split itself changes.
+- Pass every key of a drag selection in **one** `toggle` call. Calling it per
+  block bypasses the threshold and re-meshes ~7 chunks each time.
+- `fullRebuildChunkThreshold` defaults to `48 * (16³ / chunk cells)` — 48 at
+  `chunkSize: 16`, 384 at 8, 6 at 32 — because the cost of a diff scales with
+  dirty chunks × cells per chunk, not with dirty chunks alone.
+- `validate` (default on) runs the internal-invariant check at construction and
+  on every `resplit`, reporting duplicate coordinates and inner/outer overlap
+  through `onValidationError` (default `console.error`).
+- Do not call `addBlock` on the `Structure` returned by `view.inner` / `view.outer`;
+  their palettes are detached copies, so the palette indices would diverge.
 
 Bench (`node tools/bench-viewer.mjs --size 64`, 131k blocks, `chunkSize: 16`):
-one picked block goes from **1776 ms** (full re-mesh of both renderers) to
-**48.5 ms**, and a 865-block drag selection takes 191 ms across 8 dirty chunks.
+one picked block goes from **1773 ms** (full re-mesh of both renderers) to
+**52 ms**, and an 865-block drag selection takes 236 ms across 8 dirty chunks.
+
+#### Block order and translucent blending
+
+deepslate merges a chunk's quads in the order the blocks are processed, and that
+order becomes the draw order. Because the renderer blends with `BLEND` enabled —
+and `FadeStructureRenderer` draws with `depthMask(false)` — **draw order changes
+the final pixels** for semi-transparent blocks (glass, stained glass, ice, water)
+and for the whole faded layer.
+
+So the two paths must agree on order. `splitStructure`, `splitStructureCropped`
+and `filterStructureByY` normalise their output to ascending flat index
+(`x*sy*sz + y*sz + z`), `removeStoredBlock` / `addStoredBlock` preserve that
+order, and `fastPartialChunkUpdate` scans x→y→z — which is the same order. A
+partial update therefore produces byte-identical draw order to a full rebuild.
+
+If you feed a renderer a structure that did **not** come from those split
+helpers (a raw `Structure` from a converter, say), call `sortStructureBlocks(structure)`
+once before rendering, or the fade layer will shift colour whenever a chunk is
+partially updated.
 
 The underlying pieces are exported for direct use: `removeStoredBlock` /
 `addStoredBlock` / `storedBlockAt` move `deepslate` `Structure` entries in place
-(keeping `blocks` and `blocksMap` consistent), and `dirtyChunksFor` computes the
-chunk set to re-mesh, clamped to the structure bounds.
+(keeping `blocks` and `blocksMap` consistent), `dirtyChunksFor` computes the
+chunk set to re-mesh clamped to the structure bounds, and `sortStructureBlocks` /
+`structureBlocksSorted` handle order normalisation.
 
 `FadeStructureRenderer` gained a matching `updateStructureBuffers(chunkPositions?)`
-passthrough and an optional `chunkSize` option.
-
-### Render loop
-
-```ts
-import { createRenderLoop } from "@redtact/deepslate-extras";
-
-const loop = createRenderLoop({ draw: () => renderer.drawStructure(view) });
-loop.invalidate();        // request a redraw (camera moved, structure changed)
-loop.setPaused(true);     // e.g. viewer scrolled out of the viewport
-loop.dispose();           // on unmount
-```
-
-The loop stops `requestAnimationFrame` entirely while nothing is dirty, so an
-idle viewer costs zero CPU/GPU.
-
-### Fade rendering and structure splitting
-
-```ts
-import {
-  FadeStructureRenderer,
-  splitStructure,
-  filterStructureByY,
-} from "@redtact/deepslate-extras";
-
-// Split into a "selected" and "rest" structure of the same size
-const { inner, outer } = splitStructure(structure, [
-  { region: { start: [0, 0, 0], end: [15, 5, 15] }, materials: ["redstone_wire"] },
-]);
-
-// Draw `outer` translucent and desaturated behind the normally-drawn `inner`
-const fade = new FadeStructureRenderer(gl, outer, resources, sharedAtlasTexture);
-fade.drawFadedStructure(viewMatrix, 0.3, 0.7);
-```
-
-Raycasting helpers (`ddaRaycast`, `cameraRayFromMouse`, `rayToStructureEntry`)
-support pick/drag-select interactions, and `getSliceRange` /
-`filterStructureByY` implement Y-layer slicing.
+passthrough, an optional `chunkSize` option, and a public `chunkSize` getter that
+`IncrementalSplitView` checks against its own setting at construction.
 
 ## `@redtact/mc-assets`
 
