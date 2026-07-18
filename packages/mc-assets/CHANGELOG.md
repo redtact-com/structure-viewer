@@ -1,5 +1,12 @@
 # @redtact/mc-assets
 
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [b7fcc06]
+  - @redtact/deepslate-extras@0.3.0
+
 ## 0.2.1
 
 ### Patch Changes
