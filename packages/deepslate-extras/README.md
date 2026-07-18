@@ -9,12 +9,16 @@ Extras for [deepslate](https://github.com/misode/deepslate) structure viewers:
 
 - `applyDeepslatePatches` — runtime prototype patches for deepslate 0.25.1
   (bit-identical output, 2-3x faster mesh builds, Uint32 index buffers,
-  location caching, optional CPU-side quad release after GPU upload)
+  location caching, optional CPU-side quad release after GPU upload, optional
+  block-count-independent partial chunk updates)
 - `FadeStructureRenderer` — draw the unselected part of a structure translucent
   and desaturated, with selection boxes / hover / drag-preview line meshes
 - `splitStructure` / `splitStructureCropped` / `filterStructureByY` — split a
   structure by region, material, or picked positions without shifting
   coordinates
+- `IncrementalSplitView` — keep the split structures up to date in place and
+  re-mesh only the affected chunks, so toggling one picked block costs tens of
+  milliseconds instead of a full re-mesh (1776 ms → 48.5 ms at 131k blocks)
 - `ddaRaycast` / `cameraRayFromMouse` / `rayToStructureEntry` — block picking
 - `createRenderLoop` — dirty-flag `requestAnimationFrame` loop that fully stops
   when idle
