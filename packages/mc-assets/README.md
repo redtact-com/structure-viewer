@@ -3,6 +3,12 @@
 Self-hosted Minecraft asset pipeline for
 [deepslate](https://github.com/misode/deepslate) viewers.
 
+> **Not affiliated with the deepslate project or Mojang.** This is an
+> independent, community-maintained package. Minecraft is a trademark of
+> Mojang Studios; no Minecraft assets are distributed with this package — the
+> `fetch-mc-assets` CLI downloads them into your own project at build time,
+> and you are responsible for complying with the applicable asset terms.
+
 - `fetch-mc-assets` (CLI) — download blockstates/models
   (PrismarineJS/minecraft-assets, SHA-pinned) and textures (misode/mcmeta,
   version-tag-pinned) into your app's `public/mc-assets/<version>/` at build

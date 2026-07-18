@@ -3,6 +3,13 @@
 Libraries for building Minecraft structure viewers on top of
 [deepslate](https://github.com/misode/deepslate).
 
+> **Not affiliated with the deepslate project or Mojang.** These are
+> independent, community-maintained libraries that build on
+> [deepslate](https://github.com/misode/deepslate) (MIT, © Misode) and are
+> neither endorsed by nor associated with it. Minecraft is a trademark of
+> Mojang Studios; no Minecraft assets are distributed with these packages —
+> the `fetch-mc-assets` CLI downloads them into your own project at build time.
+
 | npm package | Directory | What it does |
 | --- | --- | --- |
 | `@redtact/deepslate-extras` | [`packages/deepslate-extras`](packages/deepslate-extras) | Bit-identical performance patches for deepslate, fade ("dim the unselected part") rendering, structure splitting/slicing, block raycasting, and a dirty-flag render loop. |

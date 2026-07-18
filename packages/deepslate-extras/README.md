@@ -2,6 +2,11 @@
 
 Extras for [deepslate](https://github.com/misode/deepslate) structure viewers:
 
+> **Not affiliated with the deepslate project.** This is an independent,
+> community-maintained package that builds on
+> [deepslate](https://github.com/misode/deepslate) (MIT, © Misode) and is
+> neither endorsed by nor associated with it.
+
 - `applyDeepslatePatches` — runtime prototype patches for deepslate 0.25.1
   (bit-identical output, 2-3x faster mesh builds, Uint32 index buffers,
   location caching, optional CPU-side quad release after GPU upload)
