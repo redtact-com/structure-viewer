@@ -29,6 +29,12 @@ publish の認証は 2 段階で移行する:
 
 ## 初回 publish: トークン方式（`NPM_TOKEN`）
 
+0. publish ゲートを有効化する（npm 側の準備が整うまで release job は skip される）:
+
+   ```bash
+   gh variable set NPM_PUBLISH_ENABLED --repo redtact-com/structure-viewer --body true
+   ```
+
 1. npmjs.com に npm **redtact** アカウントでログイン →
    アバター → **Access Tokens** → **Generate New Token** →
    **Granular Access Token**:

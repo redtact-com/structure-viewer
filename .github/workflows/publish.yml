@@ -14,6 +14,9 @@ permissions:
 jobs:
   release:
     name: Release
+    # npm 側の準備 (NPM_TOKEN or trusted publisher) ができるまで publish を止めるゲート。
+    # 有効化: gh variable set NPM_PUBLISH_ENABLED --repo redtact-com/structure-viewer --body true
+    if: vars.NPM_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
