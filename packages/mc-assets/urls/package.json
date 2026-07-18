@@ -1,0 +1,9 @@
+{
+  "name": "@redtact/mc-assets-urls-stub",
+  "private": true,
+  "description": "Legacy (node10 / pre-exports) resolution stub for @redtact/mc-assets/urls. Modern resolvers use the exports map in the parent package.json and ignore this file.",
+  "main": "../dist/urls.cjs",
+  "module": "../dist/urls.js",
+  "types": "../dist/urls.d.ts",
+  "sideEffects": false
+}

@@ -117,6 +117,27 @@ configureMcAssets({
 const resources = await buildResources(structure.getBlocks().map(b => b.state.getName().toString()));
 ```
 
+### Bundle size: use `/urls` for the lightweight API
+
+The main entry statically imports `deepslate/render` (for `buildResources`), and
+deepslate does not declare `sideEffects: false` — so importing anything from the
+main entry pulls deepslate into that chunk even if you only called
+`textureUrl`. For code paths that only need configuration, URL resolution, or
+raw asset fetching, import the deepslate-free subpath instead:
+
+```ts
+// ~240 B gzip — no deepslate in the bundle
+import { textureUrl, configureMcAssets, MC_VERSION } from "@redtact/mc-assets/urls";
+
+// Only where you actually build deepslate resources (~71 kB gzip with deepslate)
+import { buildResources } from "@redtact/mc-assets";
+```
+
+`/urls` exports `configureMcAssets`, `McAssetsOptions`, `mcAssetsBase`,
+`textureUrl`, `MC_VERSION`, `getBlockStates`, `getBlockModels`, and
+`fetchTexture`. The main entry re-exports all of them, so both entries share a
+single implementation and configuration state.
+
 `revision` is appended as a `?v=` query for cache busting. If you serve the
 assets with immutable/long-lived caching (recommended), wiring it is
 **required** — without it, asset pin updates are not picked up until caches
@@ -176,6 +197,11 @@ npm install @redtact/deepslate-extras @redtact/mc-assets deepslate
    // revision は immutable キャッシュ配信では必須 (忘れると pin 更新が反映されない)
    configureMcAssets({ revision: MC_ASSETS_REVISION }); // 既定 baseUrl は同一オリジン /mc-assets
    ```
+
+   バンドルサイズ注意: メインエントリは `deepslate/render` を静的 import する
+   (deepslate は `sideEffects: false` 未宣言のため tree shaking で落ちない)。
+   URL 解決・設定・アセット取得だけが必要な経路では deepslate 非依存の
+   `@redtact/mc-assets/urls` を使う (実測 gzip 241 B、メインエントリは 71.5 kB)。
 
 3. 描画 (deepslate の `StructureRenderer` と組み合わせる):
 

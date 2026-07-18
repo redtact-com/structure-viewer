@@ -36,6 +36,30 @@ configureMcAssets({ revision: MC_ASSETS_REVISION });
 const resources = await buildResources(blockNames);
 ```
 
+## Bundle size: `@redtact/mc-assets/urls`
+
+The main entry statically imports `deepslate/render` (for `buildResources`), and
+deepslate does not declare `sideEffects: false`, so it cannot be tree-shaken
+away. If a code path only needs configuration / URL resolution / asset
+fetching, import the deepslate-free subpath:
+
+```ts
+import { textureUrl, configureMcAssets } from "@redtact/mc-assets/urls";
+```
+
+Measured with esbuild (`--bundle --minify`, entry importing only
+`textureUrl` + `configureMcAssets`):
+
+| Import source | Bundle (raw) | Bundle (gzip) | deepslate |
+| --- | --- | --- | --- |
+| `@redtact/mc-assets/urls` | 297 B | 241 B | not included |
+| `@redtact/mc-assets` | 246 kB | 71.5 kB | included |
+
+`/urls` exports `configureMcAssets`, `McAssetsOptions`, `mcAssetsBase`,
+`textureUrl`, `MC_VERSION`, `getBlockStates`, `getBlockModels`, `fetchTexture`.
+The main entry re-exports them, so configuration state is shared between the
+two entries.
+
 See the [repository README](https://github.com/redtact-com/structure-viewer#readme)
 for full usage.
 

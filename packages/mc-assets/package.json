@@ -16,6 +16,16 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./urls": {
+      "import": {
+        "types": "./dist/urls.d.ts",
+        "default": "./dist/urls.js"
+      },
+      "require": {
+        "types": "./dist/urls.d.cts",
+        "default": "./dist/urls.cjs"
+      }
     }
   },
   "engines": {
@@ -24,9 +34,15 @@
   "bin": {
     "fetch-mc-assets": "./bin/fetch-mc-assets.mjs"
   },
+  "typesVersions": {
+    "*": {
+      "urls": ["./dist/urls.d.ts"]
+    }
+  },
   "files": [
     "dist/",
     "bin/",
+    "urls/",
     "README.md",
     "LICENSE",
     "NOTICE"
