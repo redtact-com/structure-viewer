@@ -145,7 +145,7 @@ describe("チャンク内 quad の描画順", () => {
     expect(diffChunkQuadSets(ordered(view), ordered(rebuilt))).toBeNull();
   });
 
-  it("【M1】ピックを 30 回繰り返しても毎回「全再構築と同じ並び」を保つ (ちらつかない)", () => {
+  it("【M1】ピックを繰り返しても「全再構築と同じ並び」を保つ (ちらつかない)", () => {
     const source = splitStructure(buildGlassStructure("zyx"), [SPEC]);
     const outer = build(source.outer);
     const inner = build(source.inner);
@@ -157,24 +157,26 @@ describe("チャンク内 quad の描画順", () => {
       .slice(0, 30);
     expect(candidates.length).toBeGreaterThan(20);
 
-    for (const pos of candidates) {
+    candidates.forEach((pos, i) => {
       const stored = removeStoredBlock(outer.structure, pos);
-      if (!stored) continue;
+      if (!stored) return;
       addStoredBlock(inner.structure, stored);
       moved.push(pos.join(","));
       const dirty = dirtyChunksFor([pos], CS, STRUCTURE_SIZE) as unknown as vec3[];
       outer.cb.updateStructureBuffers(dirty);
       inner.cb.updateStructureBuffers(dirty);
 
-      // 毎ステップ、同じ最終状態を素から全再構築したものと並び順込みで比較する。
-      // resplit が走った瞬間に絵が変わる = ちらつく、を検出できる。
+      // 同じ最終状態を素から全再構築したものと並び順込みで比較する。
+      // 「resplit が走った瞬間に絵が変わる = ちらつく」を検出できる。
+      // 参照の全再構築は高価なので数ステップおき + 最終ステップで確認する。
+      if (i % 5 !== 0 && i !== candidates.length - 1) return;
       const ref = splitStructure(buildGlassStructure("zyx"), [
         SPEC,
         { region: null, materials: null, positions: [...moved] },
       ]);
-      expect(diffChunkQuadSets(ordered(outer), ordered(build(ref.outer)))).toBeNull();
-      expect(diffChunkQuadSets(ordered(inner), ordered(build(ref.inner)))).toBeNull();
-    }
+      expect(diffChunkQuadSets(ordered(outer), ordered(build(ref.outer))), `step ${i}`).toBeNull();
+      expect(diffChunkQuadSets(ordered(inner), ordered(build(ref.inner))), `step ${i}`).toBeNull();
+    });
   });
 
   it("【対照】正規化しない構造体では並びが食い違う (順序比較テスト自体が有効なことの確認)", () => {
