@@ -1,6 +1,6 @@
 {
   "name": "@redtact/deepslate-extras",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Extras for deepslate structure viewers: bit-identical performance patches, fade rendering, structure splitting, raycasting, and a dirty-flag render loop.",
   "type": "module",
   "main": "./dist/index.cjs",
