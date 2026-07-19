@@ -88,19 +88,41 @@ export function collectTexturePaths(
 }
 
 /**
+ * deepslate の liquidRenderer が動的に組み立てるテクスチャ ID。
+ *
+ * liquidRenderer は `block/{water,lava}_{still,flow}` という ID を
+ * コード内で直接組み立てて BlockModel を生成するため、blockstate → model →
+ * parent のモデル追跡 (collectTexturePaths) では原理的に到達できない:
+ *
+ * - `*_flow` は PrismarineJS の blocks.json のどのモデルにも登場しない (参照 0 件)
+ * - `water_still` は `water` モデルの `particle` にしか現れないため、
+ *   palette に `minecraft:water` が無いと収集されない
+ *
+ * さらに liquidRenderer は `block.isWaterlogged()` でも呼ばれる。waterlogged は
+ * 任意のブロック (階段・ハーフ・フェンス・bubble_column 等) で立ちうるので、
+ * 「palette に water があるか」という条件判定では取りこぼす。4 枚で数 KB の
+ * コストしか無いため、条件を付けず常に含める方が堅い。
+ */
+const LIQUID_RENDERER_TEXTURES = [
+  'block/water_still',
+  'block/water_flow',
+  'block/lava_still',
+  'block/lava_flow',
+] as const
+
+/**
  * deepslate の SpecialRenderer が PrismarineJS モデルとは独立して直接参照するテクスチャを追加する。
  * 構造体に存在するブロック種類に応じて必要な分だけ追加する。
+ * ただし流体テクスチャだけは、waterlogged が任意のブロックで起きうるため無条件に追加する。
  */
 export function addSpecialRendererTextures(
   texturePaths: Set<string>,
   uniqueBlockNames: string[],
 ): void {
-  // 水・溶岩: liquidRenderer が block/{type}_still / block/{type}_flow を参照
-  for (const fluid of ['water', 'lava'] as const) {
-    if (uniqueBlockNames.includes(fluid)) {
-      texturePaths.add(`block/${fluid}_still`)
-      texturePaths.add(`block/${fluid}_flow`)
-    }
+  // 水・溶岩: liquidRenderer が block/{type}_still / block/{type}_flow を参照。
+  // waterlogged 経由でも呼ばれるため、palette に water/lava が無くても常に追加する。
+  for (const path of LIQUID_RENDERER_TEXTURES) {
+    texturePaths.add(path)
   }
 
   // リピーター: collectTexturePaths で収集されるが、念のため明示的に追加する

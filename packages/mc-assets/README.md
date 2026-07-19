@@ -20,9 +20,10 @@ Self-hosted Minecraft asset pipeline for
   assets are served with immutable/long-lived caching
 - `getBlockStates` / `getBlockModels` / `fetchTexture` — asset fetching with
   request de-duplication and animation-frame cropping
-- `buildResources(blockNames)` — build a complete deepslate `Resources`
-  (definitions, models, texture atlas, block flags) for exactly the blocks in
-  your structure
+- `buildResources(blockNames, options?)` — build a complete deepslate
+  `Resources` (definitions, models, texture atlas, block flags) for exactly the
+  blocks in your structure. Pass `{ extraTextures }` to add texture paths that
+  no model references
 
 `deepslate` (`^0.25.1`) is a peer dependency. Node.js >= 20.19 (or >= 22.12 on
 the 22.x line) is required for the CJS entry (`require(esm)` support).
@@ -40,6 +41,30 @@ import { MC_ASSETS_REVISION } from "./mcAssetsRevision"; // from --emit-module
 // `revision` is REQUIRED when serving the assets with immutable caching.
 configureMcAssets({ revision: MC_ASSETS_REVISION });
 const resources = await buildResources(blockNames);
+```
+
+### Textures that no model references
+
+`buildResources` normally collects textures by walking
+blockstate → model → parent for the block names you pass. Some deepslate
+render paths build texture IDs in code instead, so they are unreachable that
+way.
+
+The fluid textures are the important case: deepslate's `liquidRenderer`
+constructs `block/{water,lava}_{still,flow}` directly, and it also runs for any
+block with `waterlogged=true` — stairs, slabs, fences, `bubble_column`, and so
+on. A structure can therefore need water textures without `minecraft:water`
+ever appearing in its palette. `buildResources` **always** includes those four
+textures (a few KB) so waterlogged blocks never render as the missing-texture
+checkerboard.
+
+For your own out-of-band textures, use `extraTextures` (paths without the
+`minecraft:` prefix; the atlas key becomes `minecraft:{path}`):
+
+```ts
+const resources = await buildResources(blockNames, {
+  extraTextures: ["block/my_custom_overlay"],
+});
 ```
 
 ## Bundle size: `@redtact/mc-assets/urls`

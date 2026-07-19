@@ -15,5 +15,5 @@ export {
   textureUrl,
   type McAssetsOptions,
 } from "./urls";
-export { buildResources } from "./buildResources";
+export { buildResources, type BuildResourcesOptions } from "./buildResources";
 export { addSpecialRendererTextures, collectTexturePaths } from "./texturePaths";

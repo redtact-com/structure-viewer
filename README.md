@@ -221,6 +221,13 @@ uncached.
 block list, works around deepslate atlas sizing quirks, and returns a ready
 `Resources` for `StructureRenderer` / `FadeStructureRenderer`.
 
+Two exceptions to "only what is referenced": the four fluid textures
+(`block/{water,lava}_{still,flow}`) are always included, because deepslate's
+`liquidRenderer` builds those IDs in code and runs for any `waterlogged` block
+— no model ever references them. Pass
+`buildResources(blockNames, { extraTextures })` to add your own textures that
+models do not reference.
+
 ## Development
 
 ```bash

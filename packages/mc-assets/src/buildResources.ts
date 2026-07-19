@@ -12,7 +12,24 @@ import { collectTexturePaths, addSpecialRendererTextures } from './texturePaths'
 
 const _loggedMissing = new Set<string>()
 
-export async function buildResources(blockNames: string[]): Promise<Resources> {
+export interface BuildResourcesOptions {
+  /**
+   * モデル追跡では到達できないテクスチャを追加で読み込む。
+   *
+   * `"block/stone"` / `"entity/signs/oak"` のような、`minecraft:` 接頭辞を除いた
+   * テクスチャパスで指定する (atlas キーは `minecraft:{path}` になる)。
+   *
+   * deepslate の SpecialRenderer 系のように、blockstate → model を経由せず
+   * コード内でテクスチャ ID を組み立てる描画経路のために用意している。
+   * 流体 (water/lava) の 4 枚は既定で常に含まれるため、ここで指定する必要は無い。
+   */
+  extraTextures?: string[]
+}
+
+export async function buildResources(
+  blockNames: string[],
+  options: BuildResourcesOptions = {},
+): Promise<Resources> {
   console.log('[buildResources] Fetching block states & models...')
 
   const [statesJson, modelsJson] = await Promise.all([
@@ -73,6 +90,11 @@ export async function buildResources(blockNames: string[]): Promise<Resources> {
     modelsJson,
   )
   addSpecialRendererTextures(texturePaths, uniqueBlockNames)
+
+  for (const path of options.extraTextures ?? []) {
+    const normalized = path.replace(/^minecraft:/, '')
+    if (normalized) texturePaths.add(normalized)
+  }
 
   console.log(`[buildResources] Fetching ${texturePaths.size} textures...`)
 
