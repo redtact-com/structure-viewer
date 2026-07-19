@@ -1,6 +1,6 @@
 {
   "name": "@redtact/mc-assets",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Self-hosted Minecraft asset pipeline for deepslate viewers: blockstates/models/texture fetching, deepslate Resources building, and an asset download CLI.",
   "type": "module",
   "main": "./dist/index.cjs",
